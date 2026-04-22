@@ -128,8 +128,38 @@ function outputWord(type, plural = true) {
   if (type === 'fusing') return plural ? 'parts' : 'part'
   return plural ? 'garments' : 'garment'
 }
+// Estimate how long one lay takes to cut.
+// Returns { seconds, source } where source is:
+//   'self'        — use this session's own uptime (it's finished)
+//   'history'     — derive from the last completed session's actual speed
+//   'theoretical' — fall back to the cut_speed_m_per_min input
+//   'none'        — no data to estimate
+function estimateCutTime(session, sessionUptimeSec) {
+  if (!session) return { seconds: 0, source: 'none' }
+  const markerLen = Number(session.marker_length_m) || 0
+  if (!markerLen) return { seconds: 0, source: 'none' }
+
+  // Case 1: this session is finished — use its own uptime
+  if (session.ended_at && sessionUptimeSec > 0) {
+    return { seconds: sessionUptimeSec, source: 'self' }
+  }
+
+  // Case 2: cached actual speed from the most recent completed session
+  if (state.recentActualSpeed && state.recentActualSpeed.speed_m_per_min > 0) {
+    const sec = (markerLen / state.recentActualSpeed.speed_m_per_min) * 60
+    return { seconds: sec, source: 'history', fromName: state.recentActualSpeed.from_session_name }
+  }
+
+  // Case 3: fall back to theoretical
+  if (session.cut_speed_m_per_min > 0) {
+    return { seconds: (markerLen / session.cut_speed_m_per_min) * 60, source: 'theoretical' }
+  }
+  return { seconds: 0, source: 'none' }
+}
+
+// Kept for backwards compat (historical session detail view still uses it for perLay math).
 function cutTimeSec(s) {
-  return s.cut_speed_m_per_min ? (s.marker_length_m / s.cut_speed_m_per_min) * 60 : 0
+  return s && s.cut_speed_m_per_min ? (s.marker_length_m / s.cut_speed_m_per_min) * 60 : 0
 }
 function outputPerLay(s) { return (s.units_in_marker || 0) * (s.plies || 0) }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
@@ -150,6 +180,9 @@ const state = {
   viewSessionId: null,
   err: '',
   loading: true,
+  // Cached empirical cut speed (m/min) from the most recent completed session.
+  // Populated lazily on first load and refreshed when a session ends.
+  recentActualSpeed: null, // { speed_m_per_min, from_session_name } | null
 }
 
 // ============================================================================
@@ -206,6 +239,37 @@ async function sbOpenStoppage(sessionId) {
   return (data || [])[0] || null
 }
 
+// Find the most recent completed session, load its stoppages, and compute its
+// actual effective cut speed in m/min. Caches result in state.recentActualSpeed.
+async function refreshRecentActualSpeed(excludeSessionId) {
+  const completed = state.sessions
+    .filter(s => s.ended_at && s.marker_length_m > 0 && s.id !== excludeSessionId)
+    .sort((a, b) => new Date(b.ended_at) - new Date(a.ended_at))
+  if (!completed.length) {
+    state.recentActualSpeed = null
+    return
+  }
+  const latest = completed[0]
+  try {
+    const stops = await sbStoppages(latest.id)
+    const totalDown = stops.reduce((a, s) => a + (s.duration_seconds || 0), 0)
+    const sessionSec = (new Date(latest.ended_at) - new Date(latest.started_at)) / 1000
+    const uptimeSec = Math.max(0, sessionSec - totalDown)
+    const uptimeMin = uptimeSec / 60
+    if (uptimeMin > 0.05) {
+      state.recentActualSpeed = {
+        speed_m_per_min: latest.marker_length_m / uptimeMin,
+        from_session_name: latest.name,
+      }
+    } else {
+      state.recentActualSpeed = null
+    }
+  } catch (e) {
+    // Silent — fall back to theoretical if this fails
+    state.recentActualSpeed = null
+  }
+}
+
 // ============================================================================
 // Actions
 // ============================================================================
@@ -221,6 +285,7 @@ async function loadAll() {
       state.currentStoppage = await sbOpenStoppage(open.id)
       state.view = 'active'
     }
+    await refreshRecentActualSpeed(state.activeSession?.id)
     state.loading = false
     render()
   } catch (e) { state.err = e.message; state.loading = false; render() }
@@ -263,6 +328,7 @@ async function endSession() {
     state.activeSession = null
     state.currentStoppage = null
     state.view = 'list'
+    await refreshRecentActualSpeed()  // this session just joined history
     render()
   } catch (e) { state.err = e.message; render() }
 }
@@ -429,11 +495,22 @@ function renderActive() {
   const currentDur = state.currentStoppage ? (now - new Date(state.currentStoppage.started_at)) / 1000 : 0
   const totalDown = finishedDown + currentDur
   const uptimePct = sessionSec > 0 ? ((sessionSec - totalDown) / sessionSec) * 100 : 100
-  const cutSec = cutTimeSec(s), perLay = outputPerLay(s)
+  const est = estimateCutTime(s, sessionSec - totalDown)
+  const cutSec = est.seconds
+  const perLay = outputPerLay(s)
   const laysLost = cutSec > 0 ? totalDown / cutSec : 0
   const outputLost = laysLost * perLay
   const word = outputWord(s.session_type, true)
   const breakdown = breakdownFor(state.stoppages, state.currentStoppage)
+
+  // Human-readable label for where the cut time came from
+  const cutTimeBasis = est.source === 'self'
+    ? `based on this session's uptime`
+    : est.source === 'history'
+    ? `based on ${esc(est.fromName || 'last session')}'s actual speed`
+    : est.source === 'theoretical'
+    ? `based on theoretical input — calibrate by ending a session`
+    : ''
 
   let timerTxt
   if (state.currentStoppage) {
@@ -483,6 +560,7 @@ function renderActive() {
         <div class="stat-label">Lays lost to downtime</div>
         <div class="stat-value">${laysLost.toFixed(1)}</div>
         <div class="stat-sub">≈ ${Math.round(outputLost).toLocaleString()} ${word}</div>
+        ${cutTimeBasis ? `<div class="stat-sub" style="margin-top: 4px; font-style: italic;">${cutTimeBasis}</div>` : ''}
       </div>
     </div>
 
@@ -751,12 +829,22 @@ function renderDetail() {
     : (new Date() - new Date(s.started_at)) / 1000
   const totalDown = state.stoppages.reduce((a, x) => a + (x.duration_seconds || 0), 0)
   const uptimePct = sec > 0 ? ((sec - totalDown) / sec) * 100 : 100
-  const cutSec = cutTimeSec(s), perLay = outputPerLay(s)
+  const est = estimateCutTime(s, sec - totalDown)
+  const cutSec = est.seconds
+  const perLay = outputPerLay(s)
   const laysLost = cutSec > 0 ? totalDown / cutSec : 0
   const outputLost = laysLost * perLay
   const word = outputWord(s.session_type, true)
   const breakdown = {}
   state.stoppages.forEach(x => { breakdown[x.reason_name] = (breakdown[x.reason_name] || 0) + (x.duration_seconds || 0) })
+
+  const cutTimeBasis = est.source === 'self'
+    ? `based on this session's uptime`
+    : est.source === 'history'
+    ? `based on ${esc(est.fromName || 'last session')}'s actual speed`
+    : est.source === 'theoretical'
+    ? `based on theoretical input`
+    : ''
 
   return `<button class="btn-ghost" id="btn-back" style="margin-bottom:10px;">← Back to history</button>
     <div class="status-row">
@@ -801,6 +889,7 @@ function renderDetail() {
         <div class="stat-label">Lays lost</div>
         <div class="stat-value">${laysLost.toFixed(1)}</div>
         <div class="stat-sub">≈ ${Math.round(outputLost).toLocaleString()} ${word}</div>
+        ${cutTimeBasis ? `<div class="stat-sub" style="margin-top: 4px; font-style: italic;">${cutTimeBasis}</div>` : ''}
       </div>
     </div>
     <div class="card-title">Breakdown by reason</div>
