@@ -96,32 +96,26 @@
 }
 </script>
 
+<!-- Your config. Edit config.js, not this file. -->
+<script src="config.js"></script>
+
 <script type="module">
 import { createClient } from '@supabase/supabase-js'
 
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║                    EDIT THESE THREE LINES ONLY                           ║
-// ║                                                                          ║
-// ║  1. Replace the text between the quotes — DO NOT remove the quotes.     ║
-// ║  2. Each line must appear EXACTLY ONCE. Do not add new lines.           ║
-// ║  3. Use a plain text editor (Notepad, VS Code). NOT Word or WordPad.   ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
-
-const SUPABASE_URL      = 'https://exeaousazcuwogvdpvqn.supabase.co'
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV4ZWFvdXNhemN1d29ndmRwdnFuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY4MzU3OTQsImV4cCI6MjA5MjQxMTc5NH0.az5w1btugx0iaJiV2iJ6zTsZ6A_aLBB3grun89hx35U'
-const PASSWORD_HASH     = '340438f651ed9852a56f87f4a6881ede6bb1989b0e420911878b2823eeb5a2d7'
-
-// ╔══════════════════════════════════════════════════════════════════════════╗
-// ║                    DO NOT EDIT BELOW THIS LINE                           ║
-// ╚══════════════════════════════════════════════════════════════════════════╝
+// Config is loaded from config.js (kept separate so you never edit index.html).
+// If config.js is missing or the placeholders weren't filled in, the app shows a setup message.
+const CFG = window.APP_CONFIG || {}
+const SUPABASE_URL      = CFG.SUPABASE_URL      || ''
+const SUPABASE_ANON_KEY = CFG.SUPABASE_ANON_KEY || ''
+const PASSWORD_HASH     = CFG.PASSWORD_HASH     || ''
 
 const LS_UNLOCKED = 'cdt_unlocked_v1'  // remember-me flag
 
 const CATEGORIES = {
-  man:      { label: 'Man',          color: '#534AB7', fill: '#EEEDFE', dark: '#26215C' },
-  material: { label: 'Material',     color: '#0F6E56', fill: '#E1F5EE', dark: '#04342C' },
-  method:   { label: 'Method',       color: '#993C1D', fill: '#FAECE7', dark: '#4A1B0C' },
-  nature:   { label: 'Mother Nature', color: '#185FA5', fill: '#E6F1FB', dark: '#042C53' },
+  man:      { label: 'Man',      color: '#534AB7', fill: '#EEEDFE', dark: '#26215C' },
+  material: { label: 'Material', color: '#0F6E56', fill: '#E1F5EE', dark: '#04342C' },
+  method:   { label: 'Method',   color: '#993C1D', fill: '#FAECE7', dark: '#4A1B0C' },
+  nature:   { label: 'Machine',  color: '#185FA5', fill: '#E6F1FB', dark: '#042C53' },
 }
 
 function fmtDuration(s) {
@@ -162,8 +156,12 @@ const state = {
 // Supabase helpers
 // ============================================================================
 function initSupabase() {
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY || !PASSWORD_HASH) {
+    state.err = 'Configuration missing. Make sure config.js sits next to index.html with all three values filled in. See README.md.'
+    return false
+  }
   if (SUPABASE_URL.includes('YOUR-PROJECT-REF') || SUPABASE_ANON_KEY.includes('YOUR-ANON-KEY') || PASSWORD_HASH.includes('YOUR-SHA256-HASH')) {
-    state.err = 'This file has not been configured. Open index.html in a text editor and replace the three values in the "EDIT THESE THREE LINES ONLY" block at the top of the script. See README.md.'
+    state.err = 'config.js still has placeholder values. Edit config.js and replace the three YOUR-... values with real ones.'
     return false
   }
   try {
@@ -298,6 +296,21 @@ async function endStoppage() {
     const idx = state.stoppages.findIndex(s => s.id === data.id)
     if (idx >= 0) state.stoppages[idx] = data
     state.currentStoppage = null
+    render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+async function saveLaysCompleted(value) {
+  if (!state.activeSession) return
+  const n = Math.max(0, parseInt(value, 10) || 0)
+  try {
+    const { data, error } = await state.supabase.from('sessions')
+      .update({ lays_completed: n })
+      .eq('id', state.activeSession.id).select().single()
+    if (error) throw error
+    state.activeSession = data
+    const idx = state.sessions.findIndex(s => s.id === data.id)
+    if (idx >= 0) state.sessions[idx] = data
     render()
   } catch (e) { state.err = e.message; render() }
 }
@@ -488,6 +501,8 @@ function renderActive() {
       </div>
     </div>
 
+    ${renderCutSpeedComparison(s, sessionSec - totalDown, true)}
+
     <div class="card-title">Breakdown by reason</div>
     ${renderBreakdown(breakdown, totalDown, cutSec, perLay, word)}
 
@@ -505,6 +520,66 @@ function renderActive() {
       </div>
     </div>
     ${renderEventLog(state.stoppages, state.currentStoppage)}
+  `
+}
+
+function renderCutSpeedComparison(session, uptimeSec, editable) {
+  const theoretical = Number(session.cut_speed_m_per_min) || 0
+  const markerLen = Number(session.marker_length_m) || 0
+  const laysCompleted = Number(session.lays_completed) || 0
+
+  // Actual effective cut speed = (lays × marker length) ÷ uptime minutes
+  // This is the real-world metres-per-minute the machine achieved while cutting.
+  const uptimeMin = uptimeSec / 60
+  const linearMetersCut = laysCompleted * markerLen
+  const actual = (laysCompleted > 0 && uptimeMin > 0) ? linearMetersCut / uptimeMin : 0
+  const ratio = (actual > 0 && theoretical > 0) ? (actual / theoretical) * 100 : 0
+
+  let interp = ''
+  if (!laysCompleted) {
+    interp = `<span class="muted">Enter how many lays were completed to see the actual vs theoretical cut-speed comparison.</span>`
+  } else if (ratio >= 95) {
+    interp = `<strong>Matches theoretical.</strong> Your entered cut speed is realistic for this lay configuration.`
+  } else if (ratio >= 75) {
+    interp = `<strong>Running close to theoretical.</strong> Small gap is normal — between-lay handling, notches, path overhead.`
+  } else if (ratio >= 40) {
+    interp = `<strong>Actual is meaningfully below theoretical.</strong> Either the theoretical speed input is too optimistic (not accounting for cut path overhead), or there's idle time during cutting the app isn't seeing. Consider lowering the cut speed input to match reality, so "lays lost" numbers stay accurate.`
+  } else if (ratio > 0) {
+    interp = `<strong>Actual is far below theoretical.</strong> Almost certainly the cut speed input should be much lower — it's currently treating the head speed as if it cut in straight lines. Re-enter a speed that reflects actual lay completion times.`
+  }
+
+  const editBlock = editable ? `
+    <div class="flex" style="gap: 8px; align-items: flex-end; margin-top: 10px;">
+      <div style="flex: 1;">
+        <label class="inline">Lays completed so far</label>
+        <input type="number" min="0" step="1" id="lays-completed-input" value="${laysCompleted || ''}" placeholder="e.g. 24" />
+      </div>
+      <button id="lays-completed-save" style="padding: 10px 14px;">Save</button>
+    </div>` : ''
+
+  return `
+    <div class="card-surface">
+      <div class="card-title">Cut speed — actual vs theoretical</div>
+      <div class="grid grid-3">
+        <div class="stat">
+          <div class="stat-label">Theoretical (entered)</div>
+          <div class="stat-value">${theoretical.toFixed(1)}</div>
+          <div class="stat-sub">m/min</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Actual effective</div>
+          <div class="stat-value">${laysCompleted > 0 ? actual.toFixed(1) : '—'}</div>
+          <div class="stat-sub">${laysCompleted > 0 ? `${laysCompleted} lays × ${markerLen}m ÷ ${uptimeMin.toFixed(1)} min uptime` : 'enter lays completed'}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Actual ÷ theoretical</div>
+          <div class="stat-value">${ratio > 0 ? Math.round(ratio) + '%' : '—'}</div>
+          <div class="stat-sub">${ratio > 0 ? (ratio >= 95 ? 'matches' : ratio >= 75 ? 'close' : ratio >= 40 ? 'below theory' : 'far below') : ''}</div>
+        </div>
+      </div>
+      <div class="insight" style="margin-top: 10px;">${interp}</div>
+      ${editBlock}
+    </div>
   `
 }
 
@@ -669,18 +744,26 @@ function renderHistory() {
         const sec = s.ended_at
           ? (new Date(s.ended_at) - new Date(s.started_at)) / 1000
           : (new Date() - new Date(s.started_at)) / 1000
+        const unitsLabel = s.session_type === 'fusing' ? 'parts' : 'sizes'
         return `<div class="table-row" data-view-id="${s.id}"
-          style="grid-template-columns:1fr auto auto auto auto; cursor:pointer;">
+          style="grid-template-columns:1fr auto auto; cursor:pointer; padding: 10px 0;">
           <div>
             <div style="font-weight:500;">${esc(s.name)}</div>
-            <div class="muted" style="font-size:12px;">
-              ${s.session_type === 'fusing' ? 'Fusing' : 'Garments'} · ${esc(new Date(s.started_at).toLocaleString())}${s.operator ? ' · ' + esc(s.operator) : ''}
+            <div class="muted" style="font-size:12px; margin-top: 2px;">
+              ${s.session_type === 'fusing' ? 'Fusing' : 'Garments'} · ${esc(new Date(s.started_at).toLocaleString())}${s.operator ? ' · ' + esc(s.operator) : ''}${s.machine ? ' · ' + esc(s.machine) : ''}
+            </div>
+            <div class="muted" style="font-size:12px; margin-top: 4px;">
+              Marker <strong>${s.marker_length_m}m</strong> ·
+              ${s.units_in_marker} ${unitsLabel} ·
+              ${s.plies} plies ·
+              ${s.cut_speed_m_per_min} m/min${s.lays_completed ? ' · ' + s.lays_completed + ' lays done' : ''}
             </div>
           </div>
-          <div class="muted tabular">${fmtDuration(sec)}</div>
-          <div class="muted" style="font-size:12px;">${s.ended_at ? 'ended' : '<span style=color:var(--warning-text);font-weight:500;>open</span>'}</div>
-          <div class="muted" style="font-size:12px;">M${s.marker_length_m}m · ${s.units_in_marker}×${s.plies}</div>
-          <div class="muted" style="font-size:12px;">→</div>
+          <div style="text-align: right;">
+            <div class="tabular" style="font-weight: 500;">${fmtDuration(sec)}</div>
+            <div class="muted" style="font-size:12px;">${s.ended_at ? 'ended' : '<span style=color:var(--warning-text);font-weight:500;>open</span>'}</div>
+          </div>
+          <div class="muted" style="font-size:18px; padding: 0 4px;">→</div>
         </div>`
       }).join('')}
     </div>`
@@ -704,7 +787,7 @@ function renderDetail() {
   return `<button class="btn-ghost" id="btn-back" style="margin-bottom:10px;">← Back to history</button>
     <div class="status-row">
       <div>
-        <div class="status-label">Session · ${esc(s.name)} · ${s.session_type === 'fusing' ? 'Fusing' : 'Garments'}</div>
+        <div class="status-label">Session · ${esc(s.name)} · ${s.session_type === 'fusing' ? 'Fusing' : 'Garments'}${s.operator ? ' · ' + esc(s.operator) : ''}${s.machine ? ' · ' + esc(s.machine) : ''}</div>
         <div class="status-value">${s.ended_at ? 'Completed' : 'In progress'}</div>
       </div>
       <div style="text-align:right;">
@@ -712,6 +795,30 @@ function renderDetail() {
         <div class="status-value" style="font-size:15px;">${esc(new Date(s.started_at).toLocaleString())}</div>
       </div>
     </div>
+
+    <div class="card-title">Lay information</div>
+    <div class="grid grid-4" style="margin-bottom:1.25rem;">
+      <div class="stat">
+        <div class="stat-label">Marker length</div>
+        <div class="stat-value">${s.marker_length_m}</div>
+        <div class="stat-sub">metres</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">${s.session_type === 'fusing' ? 'Parts' : 'Sizes'} in marker</div>
+        <div class="stat-value">${s.units_in_marker}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Plies</div>
+        <div class="stat-value">${s.plies}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Cut speed (entered)</div>
+        <div class="stat-value">${s.cut_speed_m_per_min}</div>
+        <div class="stat-sub">m/min</div>
+      </div>
+    </div>
+
+    <div class="card-title">Session summary</div>
     <div class="grid grid-4" style="margin-bottom:1.25rem;">
       <div class="stat"><div class="stat-label">Total duration</div><div class="stat-value">${fmtDuration(sec)}</div></div>
       <div class="stat"><div class="stat-label">Downtime</div><div class="stat-value">${fmtDuration(totalDown)}</div></div>
@@ -724,6 +831,7 @@ function renderDetail() {
     </div>
     <div class="card-title">Breakdown by reason</div>
     ${renderBreakdown(breakdown, totalDown, cutSec, perLay, word)}
+    ${renderCutSpeedComparison(s, sec - totalDown, false)}
     <div class="card-title" style="margin-top:1.5rem;">Pareto analysis</div>
     ${renderPareto(breakdown, totalDown)}
     <div class="card-title" style="margin-top:1.5rem;">Fishbone: 4M</div>
@@ -743,7 +851,7 @@ function renderReasonsView() {
           <option value="man">Man</option>
           <option value="material">Material</option>
           <option value="method" selected>Method</option>
-          <option value="nature">Mother Nature</option>
+          <option value="nature">Machine</option>
         </select>
         <button id="r-add">Add</button>
       </div>
@@ -882,6 +990,12 @@ function wireEvents() {
   if (endBtn) endBtn.onclick = () => endSession()
   const exportBtn = document.getElementById('btn-export')
   if (exportBtn) exportBtn.onclick = exportCSV
+
+  const laysSaveBtn = document.getElementById('lays-completed-save')
+  if (laysSaveBtn) laysSaveBtn.onclick = () => {
+    const v = document.getElementById('lays-completed-input').value
+    saveLaysCompleted(v)
+  }
 
   // History
   document.querySelectorAll('[data-view-id]').forEach(row => {
