@@ -99,17 +99,21 @@
 <script type="module">
 import { createClient } from '@supabase/supabase-js'
 
-// ============================================================================
-// Config — credentials baked into the file, password-gated.
-// See README.md for how to fill these in.
-// ============================================================================
-   const SUPABASE_URL = 'https://your-project-ref.supabase.co'
-const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5...long-jwt-string...'
-const PASSWORD_HASH = '340438f651ed9852a56f87f4a6881ede6bb1989b0e420911878b2823eeb5a2d7'
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║                    EDIT THESE THREE LINES ONLY                           ║
+// ║                                                                          ║
+// ║  1. Replace the text between the quotes — DO NOT remove the quotes.     ║
+// ║  2. Each line must appear EXACTLY ONCE. Do not add new lines.           ║
+// ║  3. Use a plain text editor (Notepad, VS Code). NOT Word or WordPad.   ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
 
-// SHA-256 hex hash of the access password. Generate with the instructions in README.md.
-// The password is never stored in the file — only this hash is.
-const PASSWORD_HASH = '340438f651ed9852a56f87f4a6881ede6bb1989b0e420911878b2823eeb5a2d7'
+const SUPABASE_URL      = 'https://exeaousazcuwogvdpvqn.supabase.co'
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImV4ZWFvdXNhemN1d29ndmRwdnFuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzY4MzU3OTQsImV4cCI6MjA5MjQxMTc5NH0.az5w1btugx0iaJiV2iJ6zTsZ6A_aLBB3grun89hx35U'
+const PASSWORD_HASH     = '340438f651ed9852a56f87f4a6881ede6bb1989b0e420911878b2823eeb5a2d7'
+
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║                    DO NOT EDIT BELOW THIS LINE                           ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
 
 const LS_UNLOCKED = 'cdt_unlocked_v1'  // remember-me flag
 
@@ -158,8 +162,8 @@ const state = {
 // Supabase helpers
 // ============================================================================
 function initSupabase() {
-  if (SUPABASE_URL.startsWith('PASTE_') || SUPABASE_ANON_KEY.startsWith('PASTE_')) {
-    state.err = 'This file has not been configured. The Supabase URL and key placeholders need to be replaced before deploying. See README.md.'
+  if (SUPABASE_URL.includes('YOUR-PROJECT-REF') || SUPABASE_ANON_KEY.includes('YOUR-ANON-KEY') || PASSWORD_HASH.includes('YOUR-SHA256-HASH')) {
+    state.err = 'This file has not been configured. Open index.html in a text editor and replace the three values in the "EDIT THESE THREE LINES ONLY" block at the top of the script. See README.md.'
     return false
   }
   try {
