@@ -1,0 +1,919 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Cutting Downtime Tracker</title>
+<style>
+  :root {
+    --bg: #fafaf7; --surface: #fff; --surface-2: #f4f3ee;
+    --border: rgba(0,0,0,.12); --border-strong: rgba(0,0,0,.25);
+    --text: #1a1a1a; --text-2: #5f5e5a; --text-3: #888780;
+    --success-bg: #EAF3DE; --success-border: #639922; --success-text: #27500A;
+    --warning-bg: #FAEEDA; --warning-text: #633806;
+    --danger-bg: #FCEBEB; --danger-border: #E24B4A; --danger-text: #791F1F;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1c1c1a; --surface: #262624; --surface-2: #2f2f2d;
+      --border: rgba(255,255,255,.12); --border-strong: rgba(255,255,255,.25);
+      --text: #f5f4ef; --text-2: #b4b2a9; --text-3: #888780; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg); color: var(--text); font-size: 15px; line-height: 1.5; }
+  .app { max-width: 960px; margin: 0 auto; padding: 1.5rem 1rem 4rem; }
+  h1 { font-size: 20px; font-weight: 500; margin: 0 0 .25rem; }
+  .sub { font-size: 13px; color: var(--text-2); }
+  .card-surface { background: var(--surface-2); border-radius: 12px; padding: 1rem; margin-bottom: 1rem; }
+  .card-title { font-size: 14px; font-weight: 500; margin: 0 0 10px; }
+  input, select, button, textarea { font: inherit; color: inherit; background: var(--surface);
+    border: .5px solid var(--border); border-radius: 8px; padding: 8px 10px; outline: none; }
+  input:focus, select:focus { border-color: var(--border-strong); }
+  input[type="number"], input[type="text"] { width: 100%; }
+  label.inline { font-size: 12px; color: var(--text-2); display: block; margin-bottom: 4px; }
+  button { cursor: pointer; transition: background .15s, transform .05s; }
+  button:hover { background: var(--surface-2); }
+  button:active { transform: scale(.98); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-success { background: var(--success-bg); border-color: var(--success-border); color: var(--success-text); font-weight: 500; }
+  .btn-danger { background: var(--danger-bg); border-color: var(--danger-border); color: var(--danger-text); }
+  .btn-ghost { border: none; color: var(--text-2); padding: 4px 8px; }
+  .grid { display: grid; gap: 12px; }
+  .grid-2 { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  .grid-3 { grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); }
+  .grid-4 { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
+  .stat { background: var(--surface-2); border-radius: 8px; padding: .9rem 1rem; }
+  .stat-label { font-size: 13px; color: var(--text-2); margin-bottom: 4px; }
+  .stat-value { font-size: 20px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .stat-sub { font-size: 12px; color: var(--text-2); margin-top: 2px; }
+  .status-row { display: flex; justify-content: space-between; align-items: center;
+    flex-wrap: wrap; gap: 12px; margin-bottom: 1rem; }
+  .status-label { font-size: 13px; color: var(--text-2); margin-bottom: 4px; }
+  .status-value { font-size: 22px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .banner { padding: 12px 16px; background: var(--warning-bg); color: var(--warning-text);
+    border-radius: 8px; margin-bottom: 1rem; font-size: 14px; }
+  .reason-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+  .reason-btn { display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+    padding: 10px 12px; font-size: 13px; text-align: left; }
+  .reason-btn .name { font-weight: 500; }
+  .reason-btn .cat { font-size: 11px; }
+  .pill { font-size: 11px; padding: 2px 8px; border-radius: 10px; display: inline-block; }
+  .table-row { display: grid; align-items: center; padding: 6px 0; border-bottom: .5px solid var(--border); gap: 12px; }
+  .table-row:last-child { border-bottom: none; }
+  .muted { color: var(--text-2); }
+  .tabular { font-variant-numeric: tabular-nums; }
+  .log-box { background: var(--surface); border: .5px solid var(--border); border-radius: 8px;
+    padding: 12px; font-size: 13px; max-height: 260px; overflow-y: auto; }
+  .empty { color: var(--text-2); font-size: 13px; padding: 12px; background: var(--surface);
+    border: .5px solid var(--border); border-radius: 8px; }
+  .error { background: var(--danger-bg); color: var(--danger-text); padding: 12px 16px;
+    border-radius: 8px; margin-bottom: 1rem; font-size: 14px; cursor: pointer; }
+  .flex { display: flex; align-items: center; gap: 8px; }
+  .between { justify-content: space-between; }
+  .grow { flex: 1; }
+  .tabs { display: flex; gap: 4px; border-bottom: .5px solid var(--border); margin-bottom: 1rem; }
+  .tab { padding: 8px 14px; border: none; background: transparent; color: var(--text-2);
+    border-bottom: 2px solid transparent; border-radius: 0; cursor: pointer; }
+  .tab.active { color: var(--text); border-bottom-color: var(--text); }
+  .tab:hover { background: var(--surface-2); color: var(--text); }
+  .insight { font-size: 13px; color: var(--text-2); margin-top: 8px; }
+  .insight strong { color: var(--text); font-weight: 500; }
+  svg text { fill: var(--text); }
+  .config-panel { background: var(--surface-2); padding: 1rem; border-radius: 12px; margin-bottom: 1rem; }
+  .config-panel code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+  .hide { display: none; }
+</style>
+</head>
+<body>
+<div class="app" id="app"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@2"
+  }
+}
+</script>
+
+<script type="module">
+import { createClient } from '@supabase/supabase-js'
+
+// ============================================================================
+// Config — loaded from localStorage. User enters URL + key on first run.
+// ============================================================================
+const LS_URL = 'cdt_supabase_url'
+const LS_KEY = 'cdt_supabase_key'
+
+const CATEGORIES = {
+  man:      { label: 'Man',          color: '#534AB7', fill: '#EEEDFE', dark: '#26215C' },
+  material: { label: 'Material',     color: '#0F6E56', fill: '#E1F5EE', dark: '#04342C' },
+  method:   { label: 'Method',       color: '#993C1D', fill: '#FAECE7', dark: '#4A1B0C' },
+  nature:   { label: 'Mother Nature', color: '#185FA5', fill: '#E6F1FB', dark: '#042C53' },
+}
+
+function fmtDuration(s) {
+  s = Math.max(0, Math.floor(s || 0))
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60
+  return [h, m, sec].map(n => String(n).padStart(2, '0')).join(':')
+}
+function fmtTime(d) { return d ? new Date(d).toTimeString().slice(0, 8) : '' }
+function outputWord(type, plural = true) {
+  if (type === 'fusing') return plural ? 'parts' : 'part'
+  return plural ? 'garments' : 'garment'
+}
+function cutTimeSec(s) {
+  return s.cut_speed_m_per_min ? (s.marker_length_m / s.cut_speed_m_per_min) * 60 : 0
+}
+function outputPerLay(s) { return (s.units_in_marker || 0) * (s.plies || 0) }
+function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
+function el(html) { const d = document.createElement('div'); d.innerHTML = html.trim(); return d.firstChild }
+
+// ============================================================================
+// State
+// ============================================================================
+const state = {
+  supabase: null,
+  reasons: [],
+  sessions: [],
+  activeSession: null,
+  currentStoppage: null,
+  stoppages: [],
+  view: 'list', // list | active | history | detail | reasons | setup
+  viewSessionId: null,
+  err: '',
+  loading: true,
+}
+
+// ============================================================================
+// Supabase helpers
+// ============================================================================
+function initSupabase() {
+  const url = localStorage.getItem(LS_URL)
+  const key = localStorage.getItem(LS_KEY)
+  if (!url || !key) return false
+  try {
+    state.supabase = createClient(url, key)
+    return true
+  } catch (e) { state.err = e.message; return false }
+}
+
+async function sbReasons() {
+  const { data, error } = await state.supabase.from('reasons').select('*').order('created_at')
+  if (error) throw error
+  return data || []
+}
+async function sbSessions() {
+  const { data, error } = await state.supabase.from('sessions').select('*')
+    .order('started_at', { ascending: false }).limit(200)
+  if (error) throw error
+  return data || []
+}
+async function sbStoppages(sessionId) {
+  const { data, error } = await state.supabase.from('stoppages').select('*')
+    .eq('session_id', sessionId).order('started_at')
+  if (error) throw error
+  return data || []
+}
+async function sbOpenSession() {
+  const { data, error } = await state.supabase.from('sessions').select('*')
+    .is('ended_at', null).order('started_at', { ascending: false }).limit(1)
+  if (error) throw error
+  return (data || [])[0] || null
+}
+async function sbOpenStoppage(sessionId) {
+  const { data, error } = await state.supabase.from('stoppages').select('*')
+    .eq('session_id', sessionId).is('ended_at', null).limit(1)
+  if (error) throw error
+  return (data || [])[0] || null
+}
+
+// ============================================================================
+// Actions
+// ============================================================================
+async function loadAll() {
+  try {
+    state.loading = true; render()
+    state.reasons = await sbReasons()
+    state.sessions = await sbSessions()
+    const open = await sbOpenSession()
+    if (open) {
+      state.activeSession = open
+      state.stoppages = await sbStoppages(open.id)
+      state.currentStoppage = await sbOpenStoppage(open.id)
+      state.view = 'active'
+    }
+    state.loading = false
+    render()
+  } catch (e) { state.err = e.message; state.loading = false; render() }
+}
+
+async function startSession(form) {
+  try {
+    const payload = {
+      name: form.name || 'Untitled',
+      session_type: form.session_type,
+      marker_length_m: Number(form.marker_length_m) || 0,
+      units_in_marker: Number(form.units_in_marker) || 0,
+      plies: Number(form.plies) || 0,
+      cut_speed_m_per_min: Number(form.cut_speed_m_per_min) || 0,
+      operator: form.operator || null,
+      machine: form.machine || null,
+    }
+    const { data, error } = await state.supabase.from('sessions').insert(payload).select().single()
+    if (error) throw error
+    state.sessions.unshift(data)
+    state.activeSession = data
+    state.stoppages = []
+    state.currentStoppage = null
+    state.view = 'active'
+    render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+async function endSession() {
+  if (!state.activeSession) return
+  if (state.currentStoppage) await endStoppage()
+  if (!confirm(`End session "${state.activeSession.name}"?`)) return
+  try {
+    const { data, error } = await state.supabase.from('sessions')
+      .update({ ended_at: new Date().toISOString() })
+      .eq('id', state.activeSession.id).select().single()
+    if (error) throw error
+    const idx = state.sessions.findIndex(s => s.id === data.id)
+    if (idx >= 0) state.sessions[idx] = data
+    state.activeSession = null
+    state.currentStoppage = null
+    state.view = 'list'
+    render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+async function startStoppage(reason) {
+  if (!state.activeSession) return
+  if (state.currentStoppage) await endStoppage()
+  try {
+    const { data, error } = await state.supabase.from('stoppages').insert({
+      session_id: state.activeSession.id,
+      reason_name: reason.name,
+      reason_category: reason.category,
+    }).select().single()
+    if (error) throw error
+    state.stoppages.push(data)
+    state.currentStoppage = data
+    render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+async function endStoppage() {
+  if (!state.currentStoppage) return
+  const endedAt = new Date()
+  const startedAt = new Date(state.currentStoppage.started_at)
+  const dur = Math.max(0, (endedAt - startedAt) / 1000)
+  try {
+    const { data, error } = await state.supabase.from('stoppages')
+      .update({ ended_at: endedAt.toISOString(), duration_seconds: dur })
+      .eq('id', state.currentStoppage.id).select().single()
+    if (error) throw error
+    const idx = state.stoppages.findIndex(s => s.id === data.id)
+    if (idx >= 0) state.stoppages[idx] = data
+    state.currentStoppage = null
+    render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+async function addReason(name, category) {
+  if (!name) return
+  if (state.reasons.some(r => r.name.toLowerCase() === name.toLowerCase())) {
+    state.err = `Reason "${name}" already exists.`; render(); return
+  }
+  try {
+    const { data, error } = await state.supabase.from('reasons')
+      .insert({ name, category, is_default: false }).select().single()
+    if (error) throw error
+    state.reasons.push(data); render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+async function deleteReason(id) {
+  if (state.reasons.length <= 1) { alert('Keep at least one reason.'); return }
+  try {
+    const { error } = await state.supabase.from('reasons').delete().eq('id', id)
+    if (error) throw error
+    state.reasons = state.reasons.filter(x => x.id !== id); render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+async function viewSession(id) {
+  try {
+    state.viewSessionId = id
+    state.stoppages = await sbStoppages(id)
+    state.view = 'detail'
+    render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+function getCategory(name) {
+  const r = state.reasons.find(x => x.name === name)
+  return r ? r.category : 'method'
+}
+
+// ============================================================================
+// Render helpers
+// ============================================================================
+function breakdownFor(stoppages, currentStoppage) {
+  const b = {}
+  stoppages.forEach(s => {
+    if (s.ended_at) b[s.reason_name] = (b[s.reason_name] || 0) + (s.duration_seconds || 0)
+  })
+  if (currentStoppage) {
+    const dur = (new Date() - new Date(currentStoppage.started_at)) / 1000
+    b[currentStoppage.reason_name] = (b[currentStoppage.reason_name] || 0) + dur
+  }
+  return b
+}
+
+function renderSetup() {
+  return `
+    <h1>Cutting downtime tracker</h1>
+    <div class="sub">First-time setup</div>
+    <div style="margin: 1.5rem 0 1rem;">
+      Enter your Supabase credentials to connect this browser to your project.
+      These are stored only in this browser's localStorage — they never leave the device.
+      Get them from your Supabase project at <strong>Settings → API</strong>.
+    </div>
+    <div class="card-surface">
+      <div class="grid" style="grid-template-columns: 1fr; margin-bottom: 12px;">
+        <div>
+          <label class="inline">Supabase Project URL</label>
+          <input id="cfg-url" placeholder="https://xxxxxxxx.supabase.co" />
+        </div>
+        <div>
+          <label class="inline">Supabase anon public key</label>
+          <input id="cfg-key" placeholder="eyJhbGci..." />
+        </div>
+      </div>
+      <button class="btn-success" style="width:100%; padding: 12px;" id="cfg-save">Save and connect</button>
+    </div>
+    <details style="margin-top: 1rem; color: var(--text-2); font-size: 13px;">
+      <summary style="cursor:pointer;">First time? Haven't set up the Supabase database yet?</summary>
+      <div style="margin-top: 10px;">
+        Open your Supabase project → SQL Editor → New query → paste the schema SQL and run it.
+        The schema is in the README of your GitHub repo, or ask for it.
+      </div>
+    </details>
+  `
+}
+
+function renderStartForm() {
+  return `
+    <div class="card-surface">
+      <div class="card-title">Start new cut session</div>
+      <div class="grid grid-2" style="margin-bottom: 12px;">
+        <div>
+          <label class="inline">Session type</label>
+          <select id="f-type">
+            <option value="garments">Garments (sizes)</option>
+            <option value="fusing">Fusing block (parts)</option>
+          </select>
+        </div>
+        <div>
+          <label class="inline">Session name / lay ref</label>
+          <input id="f-name" placeholder="e.g. Lay 24-105" />
+        </div>
+      </div>
+      <div class="grid grid-3" style="margin-bottom: 12px;">
+        <div>
+          <label class="inline">Marker length (m)</label>
+          <input type="number" step="0.01" min="0" id="f-marker" value="10" />
+        </div>
+        <div>
+          <label class="inline" id="f-units-label">Sizes in marker</label>
+          <input type="number" step="1" min="0" id="f-units" value="6" />
+        </div>
+        <div>
+          <label class="inline">Plies</label>
+          <input type="number" step="1" min="0" id="f-plies" value="50" />
+        </div>
+        <div>
+          <label class="inline">Cut speed (m/min)</label>
+          <input type="number" step="0.1" min="0" id="f-speed" value="8" />
+        </div>
+      </div>
+      <div class="grid grid-2" style="margin-bottom: 12px;">
+        <div>
+          <label class="inline">Operator (optional)</label>
+          <input id="f-operator" />
+        </div>
+        <div>
+          <label class="inline">Machine (optional)</label>
+          <input id="f-machine" />
+        </div>
+      </div>
+      <button class="btn-success" style="width:100%; padding: 12px;" id="f-start">▶ Start session</button>
+    </div>
+  `
+}
+
+function renderActive() {
+  const s = state.activeSession
+  const now = new Date()
+  const sessionSec = (now - new Date(s.started_at)) / 1000
+  const finishedDown = state.stoppages.filter(x => x.ended_at).reduce((a, x) => a + (x.duration_seconds || 0), 0)
+  const currentDur = state.currentStoppage ? (now - new Date(state.currentStoppage.started_at)) / 1000 : 0
+  const totalDown = finishedDown + currentDur
+  const uptimePct = sessionSec > 0 ? ((sessionSec - totalDown) / sessionSec) * 100 : 100
+  const cutSec = cutTimeSec(s), perLay = outputPerLay(s)
+  const laysLost = cutSec > 0 ? totalDown / cutSec : 0
+  const outputLost = laysLost * perLay
+  const word = outputWord(s.session_type, true)
+  const breakdown = breakdownFor(state.stoppages, state.currentStoppage)
+
+  let timerTxt
+  if (state.currentStoppage) {
+    timerTxt = fmtDuration(currentDur)
+  } else {
+    const lastEnd = [...state.stoppages].reverse().find(x => x.ended_at)
+    const since = lastEnd ? new Date(lastEnd.ended_at) : new Date(s.started_at)
+    timerTxt = fmtDuration((now - since) / 1000)
+  }
+
+  return `
+    <div class="status-row">
+      <div>
+        <div class="status-label">Session · ${esc(s.name)} · ${s.session_type === 'fusing' ? 'Fusing' : 'Garments'}</div>
+        <div class="status-value">${state.currentStoppage ? 'Stopped' : 'Cutting'}</div>
+      </div>
+      <div style="text-align:right;">
+        <div class="status-label">${state.currentStoppage ? 'Stopped for' : 'Running for'}</div>
+        <div class="status-value">${timerTxt}</div>
+      </div>
+    </div>
+    ${state.currentStoppage ? `<div class="banner">Currently stopped: ${esc(state.currentStoppage.reason_name)}</div>` : ''}
+
+    <div class="card-surface">
+      <div class="flex between" style="margin-bottom: 10px;">
+        <div class="card-title" style="margin:0;">Stoppage reasons</div>
+        <div class="sub muted">Tap a reason to stop the machine</div>
+      </div>
+      <div class="reason-grid">
+        ${state.reasons.map(r => {
+          const cat = CATEGORIES[r.category]
+          return `<button class="reason-btn" data-reason-id="${r.id}">
+            <span class="name">${esc(r.name)}</span>
+            <span class="cat" style="color:${cat.color};">${cat.label}</span>
+          </button>`
+        }).join('')}
+      </div>
+      ${state.currentStoppage ? `<button class="btn-success" style="width:100%; margin-top:10px; padding:10px;" id="btn-resume">▶ Resume cutting</button>` : ''}
+    </div>
+
+    <div class="card-title">Session summary</div>
+    <div class="grid grid-4" style="margin-bottom:1.25rem;">
+      <div class="stat"><div class="stat-label">Session elapsed</div><div class="stat-value">${fmtDuration(sessionSec)}</div></div>
+      <div class="stat"><div class="stat-label">Total downtime</div><div class="stat-value">${fmtDuration(totalDown)}</div></div>
+      <div class="stat"><div class="stat-label">Uptime</div><div class="stat-value">${Math.round(uptimePct)}%</div></div>
+      <div class="stat">
+        <div class="stat-label">Lays lost to downtime</div>
+        <div class="stat-value">${laysLost.toFixed(1)}</div>
+        <div class="stat-sub">≈ ${Math.round(outputLost).toLocaleString()} ${word}</div>
+      </div>
+    </div>
+
+    <div class="card-title">Breakdown by reason</div>
+    ${renderBreakdown(breakdown, totalDown, cutSec, perLay, word)}
+
+    <div class="card-title" style="margin-top:1.5rem;">Pareto analysis (80/20)</div>
+    ${renderPareto(breakdown, totalDown)}
+
+    <div class="card-title" style="margin-top:1.5rem;">Fishbone: 4M root-cause view</div>
+    ${renderFishbone(breakdown, totalDown)}
+
+    <div class="flex between" style="margin:1.5rem 0 10px;">
+      <div class="card-title" style="margin:0;">Event log</div>
+      <div class="flex">
+        <button id="btn-export">Export CSV</button>
+        <button class="btn-danger" id="btn-end-session">End session</button>
+      </div>
+    </div>
+    ${renderEventLog(state.stoppages, state.currentStoppage)}
+  `
+}
+
+function renderBreakdown(breakdown, totalDown, cutSec, perLay, word) {
+  if (totalDown === 0) return `<div class="empty">No stoppages recorded yet.</div>`
+  const rows = Object.entries(breakdown).sort((a, b) => b[1] - a[1])
+  return `<div class="log-box" style="max-height:none;">
+    ${rows.map(([name, dur]) => {
+      const pct = Math.round((dur / totalDown) * 100)
+      const lays = cutSec > 0 ? dur / cutSec : 0
+      const out = Math.round(lays * perLay)
+      const cat = CATEGORIES[getCategory(name)]
+      return `<div class="table-row" style="grid-template-columns:1fr auto auto auto auto;">
+        <div style="font-weight:500;">${esc(name)}</div>
+        <div class="pill" style="background:${cat.fill}; color:${cat.dark};">${cat.label}</div>
+        <div class="muted tabular">${fmtDuration(dur)}</div>
+        <div class="muted" style="min-width:36px; text-align:right;">${pct}%</div>
+        <div class="muted" style="min-width:100px; text-align:right;">${lays.toFixed(1)} lays / ${out.toLocaleString()} ${word}</div>
+      </div>`
+    }).join('')}
+  </div>`
+}
+
+function renderPareto(breakdown, totalDown) {
+  const entries = Object.entries(breakdown).sort((a, b) => b[1] - a[1])
+  if (!entries.length || !totalDown) return `<div class="empty">Record some stoppages to see the Pareto.</div>`
+  const W = 640, H = 260, padL = 45, padR = 50, padT = 20, padB = 70
+  const plotW = W - padL - padR, plotH = H - padT - padB
+  const slotW = plotW / entries.length, barW = slotW * 0.7, barGap = slotW * 0.3
+  const maxVal = entries[0][1]
+  let cumul = 0
+  const pts = entries.map((e, i) => {
+    cumul += e[1]
+    return { x: padL + i * (barW + barGap) + barW / 2, y: padT + plotH - (cumul / totalDown) * plotH }
+  })
+  let running = 0, vital = []
+  for (const e of entries) { running += e[1]; vital.push(e[0]); if (running / totalDown >= 0.8) break }
+  const vitalPct = Math.round((vital.length / entries.length) * 100)
+  const coverPct = Math.round((running / totalDown) * 100)
+  const y80 = padT + plotH - 0.8 * plotH
+
+  let bars = '', labels = ''
+  entries.forEach(([name, dur], i) => {
+    const cat = CATEGORIES[getCategory(name)]
+    const barH = (dur / maxVal) * plotH
+    const x = padL + i * (barW + barGap)
+    const y = padT + plotH - barH
+    const pct = Math.round((dur / totalDown) * 100)
+    const lx = x + barW / 2, ly = padT + plotH + 12
+    const short = name.length > 14 ? name.slice(0, 13) + '…' : name
+    bars += `<rect x="${x}" y="${y}" width="${barW}" height="${barH}" fill="${cat.fill}" stroke="${cat.color}" stroke-width="0.5"/>
+      <text x="${x + barW/2}" y="${y - 4}" font-size="11" font-weight="500" text-anchor="middle" fill="${cat.dark}">${pct}%</text>
+      <text x="${lx}" y="${ly}" font-size="10.5" text-anchor="end" fill="var(--text-2)" transform="rotate(-35 ${lx} ${ly})">${esc(short)}</text>`
+  })
+  const path = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ' ' + p.y).join(' ')
+  const dots = pts.map(p => `<circle cx="${p.x}" cy="${p.y}" r="3" fill="#185FA5"/>`).join('')
+  const ticks = [0, 25, 50, 75, 100].map(t => {
+    const y = padT + plotH - (t / 100) * plotH
+    return `<text x="${W - padR + 4}" y="${y + 3}" font-size="10" fill="var(--text-3)">${t}%</text>`
+  }).join('')
+  const vitalList = vital.map(v => `<span style="color:${CATEGORIES[getCategory(v)].color};">${esc(v)}</span>`).join(', ')
+
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%; height:auto; max-height:300px;">
+    <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + plotH}" stroke="var(--border-strong)" stroke-width="0.5"/>
+    <line x1="${W - padR}" y1="${padT}" x2="${W - padR}" y2="${padT + plotH}" stroke="var(--border-strong)" stroke-width="0.5"/>
+    <line x1="${padL}" y1="${padT + plotH}" x2="${W - padR}" y2="${padT + plotH}" stroke="var(--border-strong)" stroke-width="0.5"/>
+    <line x1="${padL}" y1="${y80}" x2="${W - padR}" y2="${y80}" stroke="#E24B4A" stroke-width="0.5" stroke-dasharray="4 3"/>
+    <text x="${W - padR + 4}" y="${y80 + 4}" font-size="10" fill="#A32D2D">80%</text>
+    ${bars}
+    <path d="${path}" fill="none" stroke="#185FA5" stroke-width="1.5"/>
+    ${dots}${ticks}
+  </svg>
+  <div class="insight"><strong>Vital few:</strong> ${vital.length} of ${entries.length} reasons (${vitalPct}%) drive ${coverPct}% of downtime — ${vitalList}.</div>`
+}
+
+function renderFishbone(breakdown, totalDown) {
+  if (!totalDown) return `<div class="empty">Record some stoppages to see the fishbone.</div>`
+  const byCategory = { man: [], material: [], method: [], nature: [] }
+  Object.entries(breakdown).forEach(([reason, dur]) => {
+    byCategory[getCategory(reason)].push({ reason, dur, pct: (dur / totalDown) * 100 })
+  })
+  Object.keys(byCategory).forEach(k => byCategory[k].sort((a, b) => b.dur - a.dur))
+  const W = 680, H = 340, spineY = H / 2
+  const spineStartX = 40, spineEndX = W - 120, headX = W - 110
+  const ribs = [
+    { cat: 'man',      top: true,  left: true,  x: spineStartX + (spineEndX - spineStartX) * 0.22 },
+    { cat: 'method',   top: true,  left: false, x: spineStartX + (spineEndX - spineStartX) * 0.72 },
+    { cat: 'material', top: false, left: true,  x: spineStartX + (spineEndX - spineStartX) * 0.22 },
+    { cat: 'nature',   top: false, left: false, x: spineStartX + (spineEndX - spineStartX) * 0.72 },
+  ]
+  let ribsSvg = ''
+  ribs.forEach(rib => {
+    const cat = CATEGORIES[rib.cat]
+    const items = byCategory[rib.cat]
+    const catDur = items.reduce((a, b) => a + b.dur, 0)
+    const catPct = Math.round((catDur / totalDown) * 100)
+    const ribEndY = rib.top ? spineY - 130 : spineY + 130
+    const ribEndX = rib.x + (rib.top === rib.left ? -60 : 60)
+    const labelY = rib.top ? ribEndY - 8 : ribEndY + 16
+    const maxItems = Math.min(items.length, 4)
+    ribsSvg += `<line x1="${rib.x}" y1="${spineY}" x2="${ribEndX}" y2="${ribEndY}" stroke="${cat.color}" stroke-width="1.2"/>
+      <text x="${ribEndX}" y="${labelY}" font-size="12" font-weight="500" text-anchor="middle" fill="${cat.color}">${cat.label} · ${catPct}%</text>`
+    for (let i = 0; i < maxItems; i++) {
+      const t = (i + 1) / (maxItems + 1)
+      const bx = rib.x + (ribEndX - rib.x) * t
+      const by = spineY + (ribEndY - spineY) * t
+      const bEndX = bx + (rib.left ? -45 : 45)
+      const item = items[i]
+      const anchor = rib.left ? 'end' : 'start'
+      const tx = bEndX + (rib.left ? -4 : 4)
+      const short = item.reason.length > 16 ? item.reason.slice(0, 15) + '…' : item.reason
+      ribsSvg += `<line x1="${bx}" y1="${by}" x2="${bEndX}" y2="${by}" stroke="${cat.color}" stroke-width="0.8" opacity="0.7"/>
+        <text x="${tx}" y="${by - 2}" font-size="10.5" text-anchor="${anchor}">${esc(short)}</text>
+        <text x="${tx}" y="${by + 10}" font-size="10" text-anchor="${anchor}" fill="var(--text-2)">${Math.round(item.pct)}% · ${fmtDuration(item.dur)}</text>`
+    }
+    if (!items.length) {
+      ribsSvg += `<text x="${(rib.x + ribEndX) / 2}" y="${(spineY + ribEndY) / 2}" font-size="10" text-anchor="middle" fill="var(--text-3)" font-style="italic">no events</text>`
+    }
+  })
+  const catTotals = Object.entries(byCategory).map(([k, arr]) => ({
+    cat: k, label: CATEGORIES[k].label, dur: arr.reduce((a, b) => a + b.dur, 0), color: CATEGORIES[k].color,
+  })).sort((a, b) => b.dur - a.dur)
+  const dom = catTotals[0]
+  const domPct = dom && dom.dur ? Math.round((dom.dur / totalDown) * 100) : 0
+  const insight = dom && dom.dur > 0
+    ? `<div class="insight"><strong>Dominant category:</strong> <span style="color:${dom.color};">${dom.label}</span> accounts for ${domPct}% of total downtime (${fmtDuration(dom.dur)}). Focus improvement efforts here first.</div>`
+    : ''
+
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%; height:auto; max-height:360px;">
+    <line x1="${spineStartX}" y1="${spineY}" x2="${spineEndX}" y2="${spineY}" stroke="var(--text)" stroke-width="1.5"/>
+    <polygon points="${spineEndX},${spineY - 6} ${spineEndX + 10},${spineY} ${spineEndX},${spineY + 6}" fill="var(--text)"/>
+    <rect x="${headX}" y="${spineY - 22}" width="105" height="44" rx="6" fill="var(--surface-2)" stroke="var(--text)" stroke-width="1"/>
+    <text x="${headX + 52}" y="${spineY - 4}" font-size="11" font-weight="500" text-anchor="middle">Cutting</text>
+    <text x="${headX + 52}" y="${spineY + 10}" font-size="11" font-weight="500" text-anchor="middle">downtime</text>
+    ${ribsSvg}
+  </svg>${insight}`
+}
+
+function renderEventLog(stoppages, currentStoppage) {
+  const all = [...stoppages]
+  if (currentStoppage && !stoppages.find(s => s.id === currentStoppage.id)) all.push(currentStoppage)
+  if (!all.length) return `<div class="empty">No events yet.</div>`
+  return `<div class="log-box">${[...all].reverse().map(e => {
+    const ongoing = !e.ended_at
+    const dur = ongoing ? (new Date() - new Date(e.started_at)) / 1000 : (e.duration_seconds || 0)
+    return `<div class="table-row" style="grid-template-columns:1fr auto auto auto;">
+      <div>${esc(e.reason_name)}</div>
+      <div class="muted tabular">${fmtTime(e.started_at)}</div>
+      <div class="tabular" style="color:${ongoing ? 'var(--warning-text)' : 'var(--text-2)'}; font-weight:${ongoing ? 500 : 400};">
+        ${ongoing ? 'ongoing' : fmtTime(e.ended_at)}
+      </div>
+      <div class="muted tabular" style="min-width:60px; text-align:right;">${fmtDuration(dur)}</div>
+    </div>`
+  }).join('')}</div>`
+}
+
+function renderHistory() {
+  if (!state.sessions.length) return `<div class="empty">No sessions recorded yet.</div>`
+  return `<div class="card-title">All sessions</div>
+    <div class="log-box" style="max-height:none;">
+      ${state.sessions.map(s => {
+        const sec = s.ended_at
+          ? (new Date(s.ended_at) - new Date(s.started_at)) / 1000
+          : (new Date() - new Date(s.started_at)) / 1000
+        return `<div class="table-row" data-view-id="${s.id}"
+          style="grid-template-columns:1fr auto auto auto auto; cursor:pointer;">
+          <div>
+            <div style="font-weight:500;">${esc(s.name)}</div>
+            <div class="muted" style="font-size:12px;">
+              ${s.session_type === 'fusing' ? 'Fusing' : 'Garments'} · ${esc(new Date(s.started_at).toLocaleString())}${s.operator ? ' · ' + esc(s.operator) : ''}
+            </div>
+          </div>
+          <div class="muted tabular">${fmtDuration(sec)}</div>
+          <div class="muted" style="font-size:12px;">${s.ended_at ? 'ended' : '<span style=color:var(--warning-text);font-weight:500;>open</span>'}</div>
+          <div class="muted" style="font-size:12px;">M${s.marker_length_m}m · ${s.units_in_marker}×${s.plies}</div>
+          <div class="muted" style="font-size:12px;">→</div>
+        </div>`
+      }).join('')}
+    </div>`
+}
+
+function renderDetail() {
+  const s = state.sessions.find(x => x.id === state.viewSessionId)
+  if (!s) return `<div class="empty">Session not found.</div>`
+  const sec = s.ended_at
+    ? (new Date(s.ended_at) - new Date(s.started_at)) / 1000
+    : (new Date() - new Date(s.started_at)) / 1000
+  const totalDown = state.stoppages.reduce((a, x) => a + (x.duration_seconds || 0), 0)
+  const uptimePct = sec > 0 ? ((sec - totalDown) / sec) * 100 : 100
+  const cutSec = cutTimeSec(s), perLay = outputPerLay(s)
+  const laysLost = cutSec > 0 ? totalDown / cutSec : 0
+  const outputLost = laysLost * perLay
+  const word = outputWord(s.session_type, true)
+  const breakdown = {}
+  state.stoppages.forEach(x => { breakdown[x.reason_name] = (breakdown[x.reason_name] || 0) + (x.duration_seconds || 0) })
+
+  return `<button class="btn-ghost" id="btn-back" style="margin-bottom:10px;">← Back to history</button>
+    <div class="status-row">
+      <div>
+        <div class="status-label">Session · ${esc(s.name)} · ${s.session_type === 'fusing' ? 'Fusing' : 'Garments'}</div>
+        <div class="status-value">${s.ended_at ? 'Completed' : 'In progress'}</div>
+      </div>
+      <div style="text-align:right;">
+        <div class="status-label">Started</div>
+        <div class="status-value" style="font-size:15px;">${esc(new Date(s.started_at).toLocaleString())}</div>
+      </div>
+    </div>
+    <div class="grid grid-4" style="margin-bottom:1.25rem;">
+      <div class="stat"><div class="stat-label">Total duration</div><div class="stat-value">${fmtDuration(sec)}</div></div>
+      <div class="stat"><div class="stat-label">Downtime</div><div class="stat-value">${fmtDuration(totalDown)}</div></div>
+      <div class="stat"><div class="stat-label">Uptime</div><div class="stat-value">${Math.round(uptimePct)}%</div></div>
+      <div class="stat">
+        <div class="stat-label">Lays lost</div>
+        <div class="stat-value">${laysLost.toFixed(1)}</div>
+        <div class="stat-sub">≈ ${Math.round(outputLost).toLocaleString()} ${word}</div>
+      </div>
+    </div>
+    <div class="card-title">Breakdown by reason</div>
+    ${renderBreakdown(breakdown, totalDown, cutSec, perLay, word)}
+    <div class="card-title" style="margin-top:1.5rem;">Pareto analysis</div>
+    ${renderPareto(breakdown, totalDown)}
+    <div class="card-title" style="margin-top:1.5rem;">Fishbone: 4M</div>
+    ${renderFishbone(breakdown, totalDown)}
+    <div class="card-title" style="margin-top:1.5rem;">Event log</div>
+    ${renderEventLog(state.stoppages, null)}`
+}
+
+function renderReasonsView() {
+  return `<div class="card-title">Manage stoppage reasons</div>
+    <div class="sub muted" style="margin-bottom:12px;">Each reason is tagged with a 4M category so the Pareto and fishbone views can group them correctly.</div>
+    <div class="card-surface">
+      <div class="card-title">Add new reason</div>
+      <div class="flex" style="gap:8px; flex-wrap:wrap;">
+        <input class="grow" id="r-name" placeholder="e.g. Vacuum loss" style="min-width:200px;" />
+        <select id="r-cat">
+          <option value="man">Man</option>
+          <option value="material">Material</option>
+          <option value="method" selected>Method</option>
+          <option value="nature">Mother Nature</option>
+        </select>
+        <button id="r-add">Add</button>
+      </div>
+    </div>
+    <div class="log-box" style="max-height:none;">
+      ${state.reasons.map(r => {
+        const cat = CATEGORIES[r.category]
+        return `<div class="table-row" style="grid-template-columns:1fr auto auto auto;">
+          <div style="font-weight:500;">${esc(r.name)}</div>
+          <div class="pill" style="background:${cat.fill}; color:${cat.dark};">${cat.label}</div>
+          <div class="muted" style="font-size:12px;">${r.is_default ? 'default' : 'custom'}</div>
+          <button class="btn-ghost" data-del-reason="${r.id}" ${state.reasons.length <= 1 ? 'disabled' : ''}>Remove</button>
+        </div>`
+      }).join('')}
+    </div>`
+}
+
+// ============================================================================
+// Main render
+// ============================================================================
+function render() {
+  const root = document.getElementById('app')
+
+  // Setup screen if no credentials
+  if (!state.supabase) {
+    root.innerHTML = renderSetup()
+    document.getElementById('cfg-save').onclick = () => {
+      const url = document.getElementById('cfg-url').value.trim()
+      const key = document.getElementById('cfg-key').value.trim()
+      if (!url || !key) { alert('Both fields are required.'); return }
+      localStorage.setItem(LS_URL, url)
+      localStorage.setItem(LS_KEY, key)
+      if (initSupabase()) loadAll()
+      else { state.err = state.err || 'Could not create Supabase client.'; render() }
+    }
+    return
+  }
+
+  if (state.loading) {
+    root.innerHTML = `<div class="muted">Loading…</div>`
+    return
+  }
+
+  const view = state.view
+  const tabLabel = state.activeSession ? '● Active session' : 'Start session'
+
+  root.innerHTML = `
+    <div class="flex between" style="margin-bottom:1rem; flex-wrap:wrap; gap:12px;">
+      <div>
+        <h1>Cutting downtime tracker</h1>
+        <div class="sub">Per-session logging · 4M categorisation · Pareto analysis</div>
+      </div>
+      <button class="btn-ghost" id="btn-settings" title="Change Supabase credentials">⚙ Settings</button>
+    </div>
+    ${state.err ? `<div class="error" id="err-box">${esc(state.err)} <span class="muted" style="margin-left:8px;">(click to dismiss)</span></div>` : ''}
+    <div class="tabs">
+      <button class="tab ${view === 'list' || view === 'active' ? 'active' : ''}" data-tab="${state.activeSession ? 'active' : 'list'}">${tabLabel}</button>
+      <button class="tab ${view === 'history' || view === 'detail' ? 'active' : ''}" data-tab="history">History</button>
+      <button class="tab ${view === 'reasons' ? 'active' : ''}" data-tab="reasons">Reasons</button>
+    </div>
+    <div id="main-view">
+      ${view === 'list' ? renderStartForm() : ''}
+      ${view === 'active' ? renderActive() : ''}
+      ${view === 'history' ? renderHistory() : ''}
+      ${view === 'detail' ? renderDetail() : ''}
+      ${view === 'reasons' ? renderReasonsView() : ''}
+    </div>
+  `
+
+  wireEvents()
+}
+
+function wireEvents() {
+  const errBox = document.getElementById('err-box')
+  if (errBox) errBox.onclick = () => { state.err = ''; render() }
+
+  document.getElementById('btn-settings').onclick = () => {
+    if (!confirm('Change Supabase credentials? You will need to re-enter them.')) return
+    localStorage.removeItem(LS_URL); localStorage.removeItem(LS_KEY)
+    state.supabase = null; render()
+  }
+
+  document.querySelectorAll('[data-tab]').forEach(b => {
+    b.onclick = () => { state.view = b.dataset.tab; state.viewSessionId = null; render() }
+  })
+
+  // Start form
+  const fType = document.getElementById('f-type')
+  if (fType) {
+    fType.onchange = () => {
+      document.getElementById('f-units-label').textContent =
+        fType.value === 'fusing' ? 'Parts in marker' : 'Sizes in marker'
+    }
+    document.getElementById('f-start').onclick = () => {
+      startSession({
+        name: document.getElementById('f-name').value.trim(),
+        session_type: fType.value,
+        marker_length_m: document.getElementById('f-marker').value,
+        units_in_marker: document.getElementById('f-units').value,
+        plies: document.getElementById('f-plies').value,
+        cut_speed_m_per_min: document.getElementById('f-speed').value,
+        operator: document.getElementById('f-operator').value.trim(),
+        machine: document.getElementById('f-machine').value.trim(),
+      })
+    }
+  }
+
+  // Reason buttons in active session
+  document.querySelectorAll('[data-reason-id]').forEach(b => {
+    b.onclick = () => {
+      const r = state.reasons.find(x => x.id === b.dataset.reasonId)
+      if (r) startStoppage(r)
+    }
+  })
+  const resume = document.getElementById('btn-resume')
+  if (resume) resume.onclick = () => endStoppage()
+  const endBtn = document.getElementById('btn-end-session')
+  if (endBtn) endBtn.onclick = () => endSession()
+  const exportBtn = document.getElementById('btn-export')
+  if (exportBtn) exportBtn.onclick = exportCSV
+
+  // History
+  document.querySelectorAll('[data-view-id]').forEach(row => {
+    row.onclick = () => viewSession(row.dataset.viewId)
+  })
+  const back = document.getElementById('btn-back')
+  if (back) back.onclick = () => { state.view = 'history'; state.viewSessionId = null; render() }
+
+  // Reasons
+  const rAdd = document.getElementById('r-add')
+  if (rAdd) {
+    rAdd.onclick = () => {
+      const name = document.getElementById('r-name').value.trim()
+      const cat = document.getElementById('r-cat').value
+      addReason(name, cat)
+      document.getElementById('r-name').value = ''
+    }
+  }
+  document.querySelectorAll('[data-del-reason]').forEach(b => {
+    b.onclick = () => deleteReason(b.dataset.delReason)
+  })
+}
+
+function exportCSV() {
+  const s = state.activeSession
+  if (!s) return
+  const cutSec = cutTimeSec(s), perLay = outputPerLay(s)
+  const word = outputWord(s.session_type, true)
+  let csv = `Session,Type,Reason,Category,Start,End,Duration (s),Duration (hh:mm:ss),Lays lost,${word.charAt(0).toUpperCase() + word.slice(1)} lost\n`
+  state.stoppages.filter(e => e.ended_at).forEach(e => {
+    const d = e.duration_seconds || 0
+    const lays = cutSec > 0 ? d / cutSec : 0
+    const out = Math.round(lays * perLay)
+    csv += `"${s.name}","${s.session_type}","${e.reason_name}","${CATEGORIES[e.reason_category].label}","${e.started_at}","${e.ended_at}",${Math.round(d)},${fmtDuration(d)},${lays.toFixed(2)},${out}\n`
+  })
+  const blob = new Blob([csv], { type: 'text/csv' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `session-${s.name.replace(/[^a-z0-9]/gi, '_')}-${new Date().toISOString().slice(0, 10)}.csv`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+// Tick: re-render every second if on active session with state
+setInterval(() => {
+  if (state.view === 'active' && state.activeSession) render()
+}, 1000)
+
+// ============================================================================
+// Boot
+// ============================================================================
+if (initSupabase()) {
+  loadAll()
+} else {
+  state.loading = false
+  render()
+}
+</script>
+</body>
+</html>
