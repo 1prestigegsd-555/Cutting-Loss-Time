@@ -129,28 +129,33 @@ function outputWord(type, plural = true) {
   return plural ? 'garments' : 'garment'
 }
 // Estimate how long one lay takes to cut.
+// Since one session = one lay, we use this session's uptime-so-far as the
+// cut-time estimate. Simple and self-consistent: "lays lost" becomes
+// downtime ÷ uptime, which directly answers "how many more lays could I have
+// cut in the time the machine was stopped?"
+//
 // Returns { seconds, source } where source is:
-//   'self'        — use this session's own uptime (it's finished)
-//   'history'     — derive from the last completed session's actual speed
-//   'theoretical' — fall back to the cut_speed_m_per_min input
-//   'none'        — no data to estimate
+//   'self'        — using this session's accumulated uptime
+//   'history'     — session has no uptime yet, use last session's actual speed
+//   'theoretical' — no history either, fall back to cut_speed_m_per_min
+//   'none'        — can't estimate
 function estimateCutTime(session, sessionUptimeSec) {
   if (!session) return { seconds: 0, source: 'none' }
   const markerLen = Number(session.marker_length_m) || 0
   if (!markerLen) return { seconds: 0, source: 'none' }
 
-  // Case 1: this session is finished — use its own uptime
-  if (session.ended_at && sessionUptimeSec > 0) {
+  // Case 1: this session has meaningful uptime — that IS the cut time for this lay
+  if (sessionUptimeSec > 30) {   // at least 30 seconds of uptime to be meaningful
     return { seconds: sessionUptimeSec, source: 'self' }
   }
 
-  // Case 2: cached actual speed from the most recent completed session
+  // Case 2: very early in a new session — use last completed session's speed
   if (state.recentActualSpeed && state.recentActualSpeed.speed_m_per_min > 0) {
     const sec = (markerLen / state.recentActualSpeed.speed_m_per_min) * 60
     return { seconds: sec, source: 'history', fromName: state.recentActualSpeed.from_session_name }
   }
 
-  // Case 3: fall back to theoretical
+  // Case 3: no history — theoretical fallback
   if (session.cut_speed_m_per_min > 0) {
     return { seconds: (markerLen / session.cut_speed_m_per_min) * 60, source: 'theoretical' }
   }
