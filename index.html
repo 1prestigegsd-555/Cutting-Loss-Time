@@ -300,21 +300,6 @@ async function endStoppage() {
   } catch (e) { state.err = e.message; render() }
 }
 
-async function saveLaysCompleted(value) {
-  if (!state.activeSession) return
-  const n = Math.max(0, parseInt(value, 10) || 0)
-  try {
-    const { data, error } = await state.supabase.from('sessions')
-      .update({ lays_completed: n })
-      .eq('id', state.activeSession.id).select().single()
-    if (error) throw error
-    state.activeSession = data
-    const idx = state.sessions.findIndex(s => s.id === data.id)
-    if (idx >= 0) state.sessions[idx] = data
-    render()
-  } catch (e) { state.err = e.message; render() }
-}
-
 async function addReason(name, category) {
   if (!name) return
   if (state.reasons.some(r => r.name.toLowerCase() === name.toLowerCase())) {
@@ -526,36 +511,26 @@ function renderActive() {
 function renderCutSpeedComparison(session, uptimeSec, editable) {
   const theoretical = Number(session.cut_speed_m_per_min) || 0
   const markerLen = Number(session.marker_length_m) || 0
-  const laysCompleted = Number(session.lays_completed) || 0
 
-  // Actual effective cut speed = (lays × marker length) ÷ uptime minutes
-  // This is the real-world metres-per-minute the machine achieved while cutting.
+  // One session = one lay. Actual cut speed = marker length ÷ uptime minutes.
+  // Uptime already excludes all logged downtime, so this is real cutting time.
   const uptimeMin = uptimeSec / 60
-  const linearMetersCut = laysCompleted * markerLen
-  const actual = (laysCompleted > 0 && uptimeMin > 0) ? linearMetersCut / uptimeMin : 0
+  const actual = (uptimeMin > 0.05) ? markerLen / uptimeMin : 0   // ignore tiny uptimes (< 3 sec)
   const ratio = (actual > 0 && theoretical > 0) ? (actual / theoretical) * 100 : 0
+  const hasData = actual > 0
 
   let interp = ''
-  if (!laysCompleted) {
-    interp = `<span class="muted">Enter how many lays were completed to see the actual vs theoretical cut-speed comparison.</span>`
+  if (!hasData) {
+    interp = `<span class="muted">Actual speed will appear once the session has accumulated some uptime.</span>`
   } else if (ratio >= 95) {
-    interp = `<strong>Matches theoretical.</strong> Your entered cut speed is realistic for this lay configuration.`
+    interp = `<strong>Matches theoretical.</strong> Your entered cut speed is realistic for this marker.`
   } else if (ratio >= 75) {
-    interp = `<strong>Running close to theoretical.</strong> Small gap is normal — between-lay handling, notches, path overhead.`
+    interp = `<strong>Running close to theoretical.</strong> Small gap is normal — cut path overhead, notches, internal cuts.`
   } else if (ratio >= 40) {
-    interp = `<strong>Actual is meaningfully below theoretical.</strong> Either the theoretical speed input is too optimistic (not accounting for cut path overhead), or there's idle time during cutting the app isn't seeing. Consider lowering the cut speed input to match reality, so "lays lost" numbers stay accurate.`
-  } else if (ratio > 0) {
-    interp = `<strong>Actual is far below theoretical.</strong> Almost certainly the cut speed input should be much lower — it's currently treating the head speed as if it cut in straight lines. Re-enter a speed that reflects actual lay completion times.`
+    interp = `<strong>Actual is meaningfully below theoretical.</strong> The theoretical input is likely too optimistic — it treats cut path as equal to marker length, but the real head travel is longer (perimeters of pieces + notches). Consider lowering the cut speed input so "lays lost" stays accurate.`
+  } else {
+    interp = `<strong>Actual is far below theoretical.</strong> Either the cut speed input is wildly optimistic, or the session is still mid-cut and uptime is being overstated relative to work done. Re-check once the session has ended.`
   }
-
-  const editBlock = editable ? `
-    <div class="flex" style="gap: 8px; align-items: flex-end; margin-top: 10px;">
-      <div style="flex: 1;">
-        <label class="inline">Lays completed so far</label>
-        <input type="number" min="0" step="1" id="lays-completed-input" value="${laysCompleted || ''}" placeholder="e.g. 24" />
-      </div>
-      <button id="lays-completed-save" style="padding: 10px 14px;">Save</button>
-    </div>` : ''
 
   return `
     <div class="card-surface">
@@ -568,8 +543,8 @@ function renderCutSpeedComparison(session, uptimeSec, editable) {
         </div>
         <div class="stat">
           <div class="stat-label">Actual effective</div>
-          <div class="stat-value">${laysCompleted > 0 ? actual.toFixed(1) : '—'}</div>
-          <div class="stat-sub">${laysCompleted > 0 ? `${laysCompleted} lays × ${markerLen}m ÷ ${uptimeMin.toFixed(1)} min uptime` : 'enter lays completed'}</div>
+          <div class="stat-value">${hasData ? actual.toFixed(1) : '—'}</div>
+          <div class="stat-sub">${hasData ? `${markerLen}m marker ÷ ${uptimeMin.toFixed(1)} min uptime` : 'waiting for uptime'}</div>
         </div>
         <div class="stat">
           <div class="stat-label">Actual ÷ theoretical</div>
@@ -578,7 +553,6 @@ function renderCutSpeedComparison(session, uptimeSec, editable) {
         </div>
       </div>
       <div class="insight" style="margin-top: 10px;">${interp}</div>
-      ${editBlock}
     </div>
   `
 }
@@ -756,7 +730,7 @@ function renderHistory() {
               Marker <strong>${s.marker_length_m}m</strong> ·
               ${s.units_in_marker} ${unitsLabel} ·
               ${s.plies} plies ·
-              ${s.cut_speed_m_per_min} m/min${s.lays_completed ? ' · ' + s.lays_completed + ' lays done' : ''}
+              ${s.cut_speed_m_per_min} m/min
             </div>
           </div>
           <div style="text-align: right;">
@@ -990,12 +964,6 @@ function wireEvents() {
   if (endBtn) endBtn.onclick = () => endSession()
   const exportBtn = document.getElementById('btn-export')
   if (exportBtn) exportBtn.onclick = exportCSV
-
-  const laysSaveBtn = document.getElementById('lays-completed-save')
-  if (laysSaveBtn) laysSaveBtn.onclick = () => {
-    const v = document.getElementById('lays-completed-input').value
-    saveLaysCompleted(v)
-  }
 
   // History
   document.querySelectorAll('[data-view-id]').forEach(row => {
