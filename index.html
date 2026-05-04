@@ -419,6 +419,54 @@ async function endStoppage() {
   } catch (e) { state.err = e.message; render() }
 }
 
+// Update an existing (already-ended) stoppage. Can change reason and/or duration.
+async function updateStoppage(stoppageId, changes) {
+  try {
+    // If duration is changing, recompute ended_at to keep started_at + duration consistent
+    const existing = state.stoppages.find(s => s.id === stoppageId)
+    if (!existing) return
+    const payload = {}
+    if (changes.reason_name && changes.reason_category) {
+      payload.reason_name = changes.reason_name
+      payload.reason_category = changes.reason_category
+    }
+    if (typeof changes.duration_seconds === 'number') {
+      const newDur = Math.max(0, changes.duration_seconds)
+      payload.duration_seconds = newDur
+      payload.ended_at = new Date(new Date(existing.started_at).getTime() + newDur * 1000).toISOString()
+    }
+    if (Object.keys(payload).length === 0) return
+    const { data, error } = await state.supabase.from('stoppages')
+      .update(payload).eq('id', stoppageId).select().single()
+    if (error) throw error
+    const idx = state.stoppages.findIndex(s => s.id === data.id)
+    if (idx >= 0) state.stoppages[idx] = data
+    // Invalidate insights cache since the data changed
+    state.insightsData = null
+    render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+async function deleteStoppage(stoppageId) {
+  try {
+    const { error } = await state.supabase.from('stoppages').delete().eq('id', stoppageId)
+    if (error) throw error
+    state.stoppages = state.stoppages.filter(s => s.id !== stoppageId)
+    if (state.currentStoppage && state.currentStoppage.id === stoppageId) {
+      state.currentStoppage = null
+    }
+    state.insightsData = null
+    render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+// Track which stoppage row is currently being edited (for inline form)
+let editingStoppageId = null
+function setEditingStoppage(id) {
+  editingStoppageId = id
+  render()
+}
+
 async function addReason(name, category) {
   if (!name) return
   if (state.reasons.some(r => r.name.toLowerCase() === name.toLowerCase())) {
@@ -823,20 +871,53 @@ function renderFishbone(breakdown, totalDown) {
   </svg>${insight}`
 }
 
-function renderEventLog(stoppages, currentStoppage) {
+function renderEventLog(stoppages, currentStoppage, editable = true) {
   const all = [...stoppages]
   if (currentStoppage && !stoppages.find(s => s.id === currentStoppage.id)) all.push(currentStoppage)
   if (!all.length) return `<div class="empty">No events yet.</div>`
   return `<div class="log-box">${[...all].reverse().map(e => {
     const ongoing = !e.ended_at
     const dur = ongoing ? (new Date() - new Date(e.started_at)) / 1000 : (e.duration_seconds || 0)
-    return `<div class="table-row" style="grid-template-columns:1fr auto auto auto;">
+    const isEditing = editingStoppageId === e.id
+
+    if (isEditing && !ongoing) {
+      // Inline edit form
+      const reasonOpts = state.reasons.map(r =>
+        `<option value="${r.id}" ${r.name === e.reason_name ? 'selected' : ''}>${esc(r.name)} (${CATEGORIES[r.category].label})</option>`
+      ).join('')
+      return `<div style="padding: 10px 0; border-bottom: 0.5px solid var(--border); background: var(--surface-2); padding-left: 8px; padding-right: 8px; border-radius: 6px;">
+        <div style="font-size: 12px; color: var(--text-2); margin-bottom: 8px;">Editing event from ${fmtTime(e.started_at)}</div>
+        <div class="grid" style="grid-template-columns: 2fr 1fr; gap: 8px; margin-bottom: 8px;">
+          <div>
+            <label class="inline">Reason</label>
+            <select data-edit-reason="${e.id}">${reasonOpts}</select>
+          </div>
+          <div>
+            <label class="inline">Duration (seconds)</label>
+            <input type="number" min="0" step="1" data-edit-duration="${e.id}" value="${Math.round(dur)}" />
+          </div>
+        </div>
+        <div class="flex" style="gap: 6px; justify-content: flex-end;">
+          <button data-cancel-edit="${e.id}" class="btn-ghost">Cancel</button>
+          <button data-save-edit="${e.id}" class="btn-success" style="padding: 6px 14px;">Save</button>
+        </div>
+      </div>`
+    }
+
+    const actionBtns = (editable && !ongoing) ? `
+      <button class="btn-ghost" data-edit-stoppage="${e.id}" title="Edit" style="padding: 2px 8px; font-size: 12px;">Edit</button>
+      <button class="btn-ghost" data-delete-stoppage="${e.id}" title="Delete" style="padding: 2px 8px; font-size: 12px; color: var(--danger-text);">×</button>
+    ` : ''
+    const cols = (editable && !ongoing) ? '1fr auto auto auto auto auto' : '1fr auto auto auto'
+
+    return `<div class="table-row" style="grid-template-columns:${cols};">
       <div>${esc(e.reason_name)}</div>
       <div class="muted tabular">${fmtTime(e.started_at)}</div>
       <div class="tabular" style="color:${ongoing ? 'var(--warning-text)' : 'var(--text-2)'}; font-weight:${ongoing ? 500 : 400};">
         ${ongoing ? 'ongoing' : fmtTime(e.ended_at)}
       </div>
       <div class="muted tabular" style="min-width:60px; text-align:right;">${fmtDuration(dur)}</div>
+      ${actionBtns}
     </div>`
   }).join('')}</div>`
 }
@@ -1273,6 +1354,59 @@ function wireEvents() {
   }
   document.querySelectorAll('[data-del-reason]').forEach(b => {
     b.onclick = () => deleteReason(b.dataset.delReason)
+  })
+
+  // Stoppage edit/delete in event log
+  document.querySelectorAll('[data-edit-stoppage]').forEach(b => {
+    b.onclick = () => setEditingStoppage(b.dataset.editStoppage)
+  })
+  document.querySelectorAll('[data-delete-stoppage]').forEach(b => {
+    b.onclick = () => {
+      const id = b.dataset.deleteStoppage
+      const s = state.stoppages.find(x => x.id === id)
+      const label = s ? `${s.reason_name} (${fmtDuration(s.duration_seconds || 0)})` : 'this event'
+      if (confirm(`Delete ${label}?`)) deleteStoppage(id)
+    }
+  })
+  document.querySelectorAll('[data-cancel-edit]').forEach(b => {
+    b.onclick = () => setEditingStoppage(null)
+  })
+  document.querySelectorAll('[data-save-edit]').forEach(b => {
+    b.onclick = () => {
+      const id = b.dataset.saveEdit
+      const reasonSel = document.querySelector(`[data-edit-reason="${id}"]`)
+      const durInput = document.querySelector(`[data-edit-duration="${id}"]`)
+      const newReason = state.reasons.find(r => r.id === reasonSel.value)
+      const newDur = parseFloat(durInput.value)
+      const existing = state.stoppages.find(s => s.id === id)
+      if (!existing || !newReason) return
+
+      const changes = {}
+      const reasonChanged = newReason.name !== existing.reason_name
+      const durChanged = !isNaN(newDur) && Math.abs(newDur - (existing.duration_seconds || 0)) > 0.5
+
+      if (reasonChanged) {
+        changes.reason_name = newReason.name
+        changes.reason_category = newReason.category
+      }
+      if (durChanged) {
+        // Confirm duration changes (per requirement)
+        const oldFmt = fmtDuration(existing.duration_seconds || 0)
+        const newFmt = fmtDuration(newDur)
+        if (!confirm(`Change duration from ${oldFmt} to ${newFmt}?\n\nThis will update the end time of the stoppage to keep things consistent.`)) {
+          return
+        }
+        changes.duration_seconds = newDur
+      }
+
+      if (Object.keys(changes).length === 0) {
+        setEditingStoppage(null)
+        return
+      }
+
+      editingStoppageId = null
+      updateStoppage(id, changes)
+    }
   })
 }
 
