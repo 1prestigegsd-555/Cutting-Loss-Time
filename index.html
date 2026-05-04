@@ -489,6 +489,53 @@ async function deleteReason(id) {
   } catch (e) { state.err = e.message; render() }
 }
 
+// Update a reason's name and/or category. Optionally also rewrites all historical
+// stoppages with the same reason_name so old data reflects the new categorisation.
+async function updateReason(id, changes, applyToHistory) {
+  try {
+    const existing = state.reasons.find(r => r.id === id)
+    if (!existing) return
+    const payload = {}
+    if (changes.name && changes.name !== existing.name) payload.name = changes.name
+    if (changes.category && changes.category !== existing.category) payload.category = changes.category
+    if (Object.keys(payload).length === 0) return
+
+    const { data, error } = await state.supabase.from('reasons')
+      .update(payload).eq('id', id).select().single()
+    if (error) throw error
+    const idx = state.reasons.findIndex(r => r.id === id)
+    if (idx >= 0) state.reasons[idx] = data
+
+    // Rewrite historical stoppages if requested
+    if (applyToHistory) {
+      const stopUpdate = {}
+      if (payload.name) stopUpdate.reason_name = payload.name
+      if (payload.category) stopUpdate.reason_category = payload.category
+      if (Object.keys(stopUpdate).length > 0) {
+        // Match by the OLD name (existing.name) so we update all historical rows tagged that way
+        const { error: stopErr } = await state.supabase.from('stoppages')
+          .update(stopUpdate).eq('reason_name', existing.name)
+        if (stopErr) throw stopErr
+        // Refresh in-memory stoppages for current/viewed session
+        if (state.activeSession) {
+          state.stoppages = await sbStoppages(state.activeSession.id)
+        } else if (state.viewSessionId) {
+          state.stoppages = await sbStoppages(state.viewSessionId)
+        }
+      }
+    }
+    state.insightsData = null  // force reload of insights aggregates
+    editingReasonId = null
+    render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+let editingReasonId = null
+function setEditingReason(id) {
+  editingReasonId = id
+  render()
+}
+
 async function viewSession(id) {
   try {
     state.viewSessionId = id
@@ -1185,11 +1232,39 @@ function renderReasonsView() {
     <div class="log-box" style="max-height:none;">
       ${state.reasons.map(r => {
         const cat = CATEGORIES[r.category]
-        return `<div class="table-row" style="grid-template-columns:1fr auto auto auto;">
+        if (editingReasonId === r.id) {
+          // Inline edit form
+          const catOpts = ['man', 'material', 'method', 'nature']
+            .map(k => `<option value="${k}" ${k === r.category ? 'selected' : ''}>${CATEGORIES[k].label}</option>`)
+            .join('')
+          return `<div style="padding: 10px 0; border-bottom: 0.5px solid var(--border); background: var(--surface-2); padding-left: 8px; padding-right: 8px; border-radius: 6px;">
+            <div style="font-size: 12px; color: var(--text-2); margin-bottom: 8px;">Editing: ${esc(r.name)}</div>
+            <div class="grid" style="grid-template-columns: 2fr 1fr; gap: 8px; margin-bottom: 8px;">
+              <div>
+                <label class="inline">Reason name</label>
+                <input data-edit-reason-name="${r.id}" value="${esc(r.name)}" />
+              </div>
+              <div>
+                <label class="inline">Category</label>
+                <select data-edit-reason-cat="${r.id}">${catOpts}</select>
+              </div>
+            </div>
+            <label class="flex" style="gap: 6px; font-size: 13px; color: var(--text-2); margin-bottom: 10px; cursor: pointer;">
+              <input type="checkbox" data-edit-reason-history="${r.id}" checked style="width: auto;" />
+              Also update past stoppages with this reason
+            </label>
+            <div class="flex" style="gap: 6px; justify-content: flex-end;">
+              <button data-cancel-reason-edit="${r.id}" class="btn-ghost">Cancel</button>
+              <button data-save-reason-edit="${r.id}" class="btn-success" style="padding: 6px 14px;">Save</button>
+            </div>
+          </div>`
+        }
+        return `<div class="table-row" style="grid-template-columns:1fr auto auto auto auto;">
           <div style="font-weight:500;">${esc(r.name)}</div>
           <div class="pill" style="background:${cat.fill}; color:${cat.dark};">${cat.label}</div>
           <div class="muted" style="font-size:12px;">${r.is_default ? 'default' : 'custom'}</div>
-          <button class="btn-ghost" data-del-reason="${r.id}" ${state.reasons.length <= 1 ? 'disabled' : ''}>Remove</button>
+          <button class="btn-ghost" data-edit-reason="${r.id}" style="padding: 2px 8px; font-size: 12px;">Edit</button>
+          <button class="btn-ghost" data-del-reason="${r.id}" ${state.reasons.length <= 1 ? 'disabled' : ''} style="padding: 2px 8px; font-size: 12px; color: var(--danger-text);">×</button>
         </div>`
       }).join('')}
     </div>`
@@ -1353,7 +1428,34 @@ function wireEvents() {
     }
   }
   document.querySelectorAll('[data-del-reason]').forEach(b => {
-    b.onclick = () => deleteReason(b.dataset.delReason)
+    b.onclick = () => {
+      const id = b.dataset.delReason
+      const r = state.reasons.find(x => x.id === id)
+      if (!r) return
+      if (confirm(`Delete reason "${r.name}"?\n\nPast stoppages with this name will keep their data, but you won't be able to log new ones with this reason.`)) {
+        deleteReason(id)
+      }
+    }
+  })
+  document.querySelectorAll('[data-edit-reason]').forEach(b => {
+    b.onclick = () => setEditingReason(b.dataset.editReason)
+  })
+  document.querySelectorAll('[data-cancel-reason-edit]').forEach(b => {
+    b.onclick = () => setEditingReason(null)
+  })
+  document.querySelectorAll('[data-save-reason-edit]').forEach(b => {
+    b.onclick = () => {
+      const id = b.dataset.saveReasonEdit
+      const nameInput = document.querySelector(`[data-edit-reason-name="${id}"]`)
+      const catSel = document.querySelector(`[data-edit-reason-cat="${id}"]`)
+      const histCheck = document.querySelector(`[data-edit-reason-history="${id}"]`)
+      const newName = nameInput.value.trim()
+      if (!newName) { alert('Name cannot be empty.'); return }
+      // Prevent duplicate names
+      const dup = state.reasons.find(r => r.id !== id && r.name.toLowerCase() === newName.toLowerCase())
+      if (dup) { alert(`Another reason already uses the name "${newName}".`); return }
+      updateReason(id, { name: newName, category: catSel.value }, histCheck.checked)
+    }
   })
 
   // Stoppage edit/delete in event log
