@@ -2060,6 +2060,14 @@ function fRenderInsights() {
   const overallUptimePct = totalSessionSec > 0 ? (totalUptimeSec / totalSessionSec) * 100 : 0
   const overallRealignRate = totalPanels > 0 ? (totalRealigns / totalPanels) * 100 : 0
 
+  // Aggregate output rates across the date range
+  // Projected = panels per uptime hour (theoretical max if zero downtime)
+  // Actual    = panels per total elapsed hour (real-world rate)
+  const aggProjectedHr = totalUptimeSec > 0 ? totalPanels / (totalUptimeSec / 3600) : 0
+  const aggActualHr    = totalSessionSec > 0 ? totalPanels / (totalSessionSec / 3600) : 0
+  // Volume of panels effectively lost to downtime over the period
+  const panelsLostToDowntime = (aggProjectedHr - aggActualHr) * (totalSessionSec / 3600)
+
   const fGetCategory = name => {
     if (name === 'Idle (untagged)') return 'method'
     const r = state.fReasons.find(x => x.name === name)
@@ -2069,7 +2077,7 @@ function fRenderInsights() {
   return `<div class="card-title">Fusing insights · ${rangeLabels[state.fInsightsRange]}</div>
     <div class="tabs" style="margin-bottom: 1rem;">${tabs}</div>
 
-    <div class="grid grid-4" style="margin-bottom: 1.25rem;">
+    <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 1.25rem;">
       <div class="stat">
         <div class="stat-label">Total bundle time</div>
         <div class="stat-value">${fmtDuration(totalSessionSec)}</div>
@@ -2089,31 +2097,59 @@ function fRenderInsights() {
         <div class="stat-value">${totalPanels.toLocaleString()}</div>
         <div class="stat-sub">${overallRealignRate.toFixed(1)}% realign rate</div>
       </div>
+      <div class="stat">
+        <div class="stat-label">Output rate (panels/hr)</div>
+        <div class="stat-value" style="font-size: 18px; line-height: 1.3;">
+          <span title="Projected if zero downtime">${aggProjectedHr > 0 ? Math.round(aggProjectedHr) : '—'}</span>
+          <span class="muted" style="font-size: 13px; font-weight: 400;"> proj</span>
+          <span class="muted" style="font-size: 13px; font-weight: 400;"> · </span>
+          <span style="color: var(--text);">${aggActualHr > 0 ? Math.round(aggActualHr) : '—'}</span>
+          <span class="muted" style="font-size: 13px; font-weight: 400;"> actual</span>
+        </div>
+        <div class="stat-sub">${panelsLostToDowntime > 0 ? `≈ ${Math.round(panelsLostToDowntime).toLocaleString()} panels lost to downtime` : ''}</div>
+      </div>
     </div>
 
     <div class="card-title">Per-bundle detail</div>
     <div class="log-box" style="max-height:none; overflow-x: auto;">
-      <div class="table-row" style="grid-template-columns: 1.5fr 0.7fr 0.7fr 0.7fr 0.7fr 0.7fr 0.8fr; font-weight: 500; font-size: 12px; color: var(--text-2); border-bottom: 0.5px solid var(--border-strong); position: sticky; top: 0; background: var(--surface);">
+      <div class="table-row" style="grid-template-columns: 1.5fr 0.6fr 0.6fr 0.6fr 0.6fr 0.6fr 0.7fr 0.7fr 0.6fr; font-weight: 500; font-size: 12px; color: var(--text-2); border-bottom: 0.5px solid var(--border-strong); position: sticky; top: 0; background: var(--surface);">
         <div>Bundle</div>
         <div style="text-align: right;">Panels</div>
         <div style="text-align: right;">Uptime</div>
         <div style="text-align: right;">Downtime</div>
         <div style="text-align: right;">Untagged</div>
         <div style="text-align: right;">Avg cycle</div>
+        <div style="text-align: right;" title="Panels per uptime hour (zero downtime)">Proj /hr</div>
+        <div style="text-align: right;" title="Panels per total elapsed hour">Actual /hr</div>
         <div style="text-align: right;">Uptime %</div>
       </div>
       ${bundleRows.map(({ session: s, m }) => {
         const dateLabel = new Date(s.started_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
-        return `<div class="table-row" data-f-view-id="${s.id}" style="grid-template-columns: 1.5fr 0.7fr 0.7fr 0.7fr 0.7fr 0.7fr 0.8fr; font-size: 13px; cursor: pointer;">
+        const isOpen = !s.ended_at
+        const lowConfidence = m.completedPanelsCount < 10
+        // Per-bundle hourly rates
+        const projHr   = m.uptimeSec > 0   ? m.completedPanelsCount / (m.uptimeSec / 3600)   : 0
+        const actualHr = m.sessionSec > 0  ? m.completedPanelsCount / (m.sessionSec / 3600)  : 0
+        // Display rules:
+        //   - open bundles: hide projection (—). Actual still shown for completed panels so far.
+        //   - low confidence (<10 panels) but completed: show but dim the row
+        const projDisp   = isOpen ? '<span class="muted">—</span>' : (projHr > 0 ? Math.round(projHr) : '<span class="muted">—</span>')
+        const actualDisp = actualHr > 0 ? Math.round(actualHr) : '<span class="muted">—</span>'
+        const rowOpacity = (lowConfidence && !isOpen) ? '0.55' : '1'
+        const lowConfNote = (lowConfidence && !isOpen) ? ' · <span style="color:var(--text-3); font-style: italic;">low sample</span>' : ''
+
+        return `<div class="table-row" data-f-view-id="${s.id}" style="grid-template-columns: 1.5fr 0.6fr 0.6fr 0.6fr 0.6fr 0.6fr 0.7fr 0.7fr 0.6fr; font-size: 13px; cursor: pointer; opacity: ${rowOpacity};">
           <div>
             <div style="font-weight: 500;">${esc(s.name)}</div>
-            <div class="muted" style="font-size: 12px;">${dateLabel}${s.ended_at ? '' : ' · <span style="color:var(--warning-text);">open</span>'}</div>
+            <div class="muted" style="font-size: 12px;">${dateLabel}${isOpen ? ' · <span style="color:var(--warning-text);">open</span>' : ''}${lowConfNote}</div>
           </div>
           <div class="tabular" style="text-align: right;">${m.completedPanelsCount}</div>
           <div class="tabular" style="text-align: right;">${fmtDuration(m.uptimeSec)}</div>
           <div class="tabular" style="text-align: right; color: ${m.totalDowntimeSec > 0 ? 'var(--text)' : 'var(--text-3)'};">${fmtDuration(m.totalDowntimeSec)}</div>
           <div class="tabular" style="text-align: right; color: ${m.untaggedIdleSec > 60 ? 'var(--danger-text)' : 'var(--text-3)'};">${fmtDuration(m.untaggedIdleSec)}</div>
           <div class="tabular" style="text-align: right;">${m.avgCycleSec > 0 ? m.avgCycleSec.toFixed(1) + 's' : '—'}</div>
+          <div class="tabular" style="text-align: right;">${projDisp}</div>
+          <div class="tabular" style="text-align: right;">${actualDisp}</div>
           <div class="tabular" style="text-align: right;">${Math.round(m.uptimePct)}%</div>
         </div>`
       }).join('')}
