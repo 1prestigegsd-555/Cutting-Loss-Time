@@ -420,7 +420,7 @@ async function fStartSession(form) {
 async function fEndSession() {
   if (!state.fActiveSession) return
   if (state.fCurrentStoppage) await fEndStoppage()
-  if (state.fCurrentPanel) await fEndCurrentPanel()
+  if (state.fCurrentPanel) await fEndPanel()
   if (!confirm(`End fusing session "${state.fActiveSession.name}"?`)) return
   try {
     const { data, error } = await state.supabase.from('fusing_sessions')
@@ -435,10 +435,13 @@ async function fEndSession() {
   } catch (e) { state.err = e.message; render() }
 }
 
-async function fLogPanel() {
+// Explicit two-tap workflow: Start panel begins a cycle, End panel closes it.
+// If a stoppage occurs mid-panel, the stoppage auto-closes the active panel
+// (preserves current behaviour — operators don't have to End first).
+async function fStartPanel() {
   if (!state.fActiveSession) return
+  if (state.fCurrentPanel) return  // safety: button should be disabled, but no-op if not
   if (state.fCurrentStoppage) await fEndStoppage()
-  if (state.fCurrentPanel) await fEndCurrentPanel()
   try {
     const { data, error } = await state.supabase.from('fusing_events').insert({
       session_id: state.fActiveSession.id, event_type: 'panel',
@@ -450,7 +453,7 @@ async function fLogPanel() {
   } catch (e) { state.err = e.message; render() }
 }
 
-async function fEndCurrentPanel() {
+async function fEndPanel() {
   if (!state.fCurrentPanel) return
   const endedAt = new Date()
   const dur = Math.max(0, (endedAt - new Date(state.fCurrentPanel.started_at)) / 1000)
@@ -462,13 +465,14 @@ async function fEndCurrentPanel() {
     const idx = state.fEvents.findIndex(e => e.id === data.id)
     if (idx >= 0) state.fEvents[idx] = data
     state.fCurrentPanel = null
+    render()
   } catch (e) { state.err = e.message; render() }
 }
 
 async function fStartStoppage(reason) {
   if (!state.fActiveSession) return
   if (state.fCurrentStoppage) await fEndStoppage()
-  if (state.fCurrentPanel) await fEndCurrentPanel()
+  if (state.fCurrentPanel) await fEndPanel()
   try {
     const { data, error } = await state.supabase.from('fusing_events').insert({
       session_id: state.fActiveSession.id, event_type: 'stoppage',
@@ -1610,15 +1614,19 @@ function fRenderActive() {
   const uptimeSec = Math.max(0, sessionSec - totalDowntimeSec)
   const uptimePct = sessionSec > 0 ? (uptimeSec / sessionSec) * 100 : 100
   const panelsCount = panels.length
-  const avgCycleSec = completedPanels.length > 0 ? panelTimeFinished / completedPanels.length : 0
+  const completedPanelsCount = completedPanels.length
+  // Three cycle metrics (see computeFusingMetrics for definitions)
+  const avgActiveSec = completedPanelsCount > 0 ? panelTimeFinished / completedPanelsCount : 0
+  const avgIdleSec   = completedPanelsCount > 0 ? untaggedIdleSec   / completedPanelsCount : 0
+  const avgCycleSec  = avgActiveSec + avgIdleSec
 
   let statusLabel, timerLabel, timerVal
   if (state.fCurrentStoppage) {
     statusLabel = 'Stopped'; timerLabel = 'Stopped for'; timerVal = fmtDuration(currentStoppageDur)
   } else if (state.fCurrentPanel) {
-    statusLabel = 'Loading panel'; timerLabel = 'Panel cycle'; timerVal = fmtDuration(currentPanelDur)
+    statusLabel = 'Panel running'; timerLabel = 'Active panel'; timerVal = fmtDuration(currentPanelDur)
   } else {
-    statusLabel = 'Idle'; timerLabel = 'Since last action'
+    statusLabel = 'Idle — awaiting next panel'; timerLabel = 'Idle for'
     const lastEnd = state.fEvents.filter(e => e.ended_at).map(e => new Date(e.ended_at)).sort((a, b) => b - a)[0] || new Date(s.started_at)
     timerVal = fmtDuration((now - lastEnd) / 1000)
   }
@@ -1655,11 +1663,16 @@ function fRenderActive() {
     ${state.fCurrentStoppage ? `<div class="banner">Currently stopped: ${esc(state.fCurrentStoppage.reason_name)}</div>` : ''}
 
     <div class="card-surface">
-      <button id="f-panel-btn" class="btn-success" style="width:100%; padding: 18px; font-size: 17px; font-weight: 500;">
-        ▶ Panel (tap when next panel is loaded)
-      </button>
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+        <button id="f-start-panel-btn" class="${state.fCurrentPanel ? '' : 'btn-success'}" ${state.fCurrentPanel ? 'disabled' : ''} style="padding: 18px; font-size: 17px; font-weight: 500;">
+          ▶ Start panel
+        </button>
+        <button id="f-end-panel-btn" class="${state.fCurrentPanel ? 'btn-danger' : ''}" ${state.fCurrentPanel ? '' : 'disabled'} style="padding: 18px; font-size: 17px; font-weight: 500;">
+          ■ End panel
+        </button>
+      </div>
       <div class="muted" style="font-size: 12px; margin-top: 8px; text-align: center;">
-        Each tap starts a new panel cycle and closes the previous one. Tap a stoppage button below to stop.
+        Tap <strong>Start</strong> when placing the panel · tap <strong>End</strong> when fused and ready. Time between End and next Start is recorded as idle.
       </div>
     </div>
 
@@ -1694,9 +1707,28 @@ function fRenderActive() {
         <div class="stat-sub">${Math.round(uptimePct)}% uptime · ${fmtDuration(untaggedIdleSec)} untagged</div>
       </div>
       <div class="stat">
-        <div class="stat-label">Avg cycle time</div>
+        <div class="stat-label">Total cycle (per panel)</div>
         <div class="stat-value">${avgCycleSec > 0 ? avgCycleSec.toFixed(1) + 's' : '—'}</div>
-        <div class="stat-sub">per panel loaded</div>
+        <div class="stat-sub">active + idle</div>
+      </div>
+    </div>
+
+    <div class="card-title">Cycle breakdown per panel</div>
+    <div class="grid grid-3" style="margin-bottom: 1.25rem;">
+      <div class="stat">
+        <div class="stat-label">Active time</div>
+        <div class="stat-value">${avgActiveSec > 0 ? avgActiveSec.toFixed(1) + 's' : '—'}</div>
+        <div class="stat-sub">Start → End (placement + press + unload)</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Idle between panels</div>
+        <div class="stat-value">${avgIdleSec > 0 ? avgIdleSec.toFixed(1) + 's' : '—'}</div>
+        <div class="stat-sub">End → next Start</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Total cycle</div>
+        <div class="stat-value">${avgCycleSec > 0 ? avgCycleSec.toFixed(1) + 's' : '—'}</div>
+        <div class="stat-sub">per-panel throughput</div>
       </div>
     </div>
 
@@ -1708,9 +1740,9 @@ function fRenderActive() {
           <div class="stat-sub">${realignCount} realigns / ${panelsCount} panels</div>
         </div>
         <div class="stat">
-          <div class="stat-label">Idle belt time</div>
+          <div class="stat-label">Idle belt time (Waiting)</div>
           <div class="stat-value">${fmtDuration(waitingTime)}</div>
-          <div class="stat-sub">press running with no work</div>
+          <div class="stat-sub">tagged Waiting reason</div>
         </div>
       </div>
     ` : ''}
@@ -1857,8 +1889,15 @@ function computeFusingMetrics(session, events) {
   const uptimePct = sessionSec > 0 ? (uptimeSec / sessionSec) * 100 : 100
   const panelsCount = panels.length
   const completedPanelsCount = completedPanels.length
-  const avgCycleSec = completedPanelsCount > 0 ? panelTimeFinished / completedPanelsCount : 0
 
+  // Three cycle metrics:
+  //   Active = mean panel duration (Start → End)
+  //   Idle   = mean untagged idle gap between panels
+  //   Total  = active + idle (throughput cycle, what one panel "costs" end-to-end)
+  // Idle is divided by completedPanelsCount to give a comparable per-panel figure.
+  const avgActiveSec = completedPanelsCount > 0 ? panelTimeFinished / completedPanelsCount : 0
+  const avgIdleSec   = completedPanelsCount > 0 ? untaggedIdleSec   / completedPanelsCount : 0
+  const avgCycleSec  = avgActiveSec + avgIdleSec
   // Breakdown including untagged idle as a synthetic reason
   const breakdown = {}
   completedStoppages.forEach(e => { breakdown[e.reason_name] = (breakdown[e.reason_name] || 0) + (e.duration_seconds || 0) })
@@ -1872,7 +1911,8 @@ function computeFusingMetrics(session, events) {
 
   return {
     sessionSec, totalPanelTime, totalStoppageTime, untaggedIdleSec, totalDowntimeSec,
-    uptimeSec, uptimePct, panelsCount, completedPanelsCount, avgCycleSec,
+    uptimeSec, uptimePct, panelsCount, completedPanelsCount,
+    avgActiveSec, avgIdleSec, avgCycleSec,
     currentPanel, currentStoppage, currentPanelDur, currentStoppageDur,
     breakdown, realignCount, realignRate, waitingTime, IDLE_REASON_NAME,
   }
@@ -1941,9 +1981,28 @@ function fRenderDetail() {
         <div class="stat-sub">${Math.round(m.uptimePct)}% uptime · ${fmtDuration(m.untaggedIdleSec)} untagged</div>
       </div>
       <div class="stat">
-        <div class="stat-label">Avg cycle time</div>
+        <div class="stat-label">Total cycle (per panel)</div>
         <div class="stat-value">${m.avgCycleSec > 0 ? m.avgCycleSec.toFixed(1) + 's' : '—'}</div>
-        <div class="stat-sub">per panel</div>
+        <div class="stat-sub">active + idle</div>
+      </div>
+    </div>
+
+    <div class="card-title">Cycle breakdown per panel</div>
+    <div class="grid grid-3" style="margin-bottom: 1.25rem;">
+      <div class="stat">
+        <div class="stat-label">Active time</div>
+        <div class="stat-value">${m.avgActiveSec > 0 ? m.avgActiveSec.toFixed(1) + 's' : '—'}</div>
+        <div class="stat-sub">Start → End</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Idle between panels</div>
+        <div class="stat-value">${m.avgIdleSec > 0 ? m.avgIdleSec.toFixed(1) + 's' : '—'}</div>
+        <div class="stat-sub">End → next Start</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Total cycle</div>
+        <div class="stat-value">${m.avgCycleSec > 0 ? m.avgCycleSec.toFixed(1) + 's' : '—'}</div>
+        <div class="stat-sub">per-panel throughput</div>
       </div>
     </div>
 
@@ -1955,7 +2014,7 @@ function fRenderDetail() {
           <div class="stat-sub">${m.realignCount} realigns / ${m.panelsCount} panels</div>
         </div>
         <div class="stat">
-          <div class="stat-label">Idle belt time</div>
+          <div class="stat-label">Idle belt time (Waiting)</div>
           <div class="stat-value">${fmtDuration(m.waitingTime)}</div>
           <div class="stat-sub">tagged Waiting reason</div>
         </div>
@@ -2488,8 +2547,10 @@ function wireEvents() {
     }
   }
   // Fusing active session buttons
-  const fPanelBtn = document.getElementById('f-panel-btn')
-  if (fPanelBtn) fPanelBtn.onclick = () => fLogPanel()
+  const fStartBtn = document.getElementById('f-start-panel-btn')
+  if (fStartBtn) fStartBtn.onclick = () => fStartPanel()
+  const fEndPBtn = document.getElementById('f-end-panel-btn')
+  if (fEndPBtn) fEndPBtn.onclick = () => fEndPanel()
   const fResumeBtn = document.getElementById('f-resume-btn')
   if (fResumeBtn) fResumeBtn.onclick = () => fEndStoppage()
   const fEndBtn = document.getElementById('f-end-session-btn')
