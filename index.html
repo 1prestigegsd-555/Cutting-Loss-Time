@@ -495,6 +495,107 @@ async function fEndStoppage() {
   } catch (e) { state.err = e.message; render() }
 }
 
+// ─── Fusing reason CRUD ─────────────────────────────────────────────────────
+async function fAddReason(name, category) {
+  if (!name) return
+  if (state.fReasons.some(r => r.name.toLowerCase() === name.toLowerCase())) {
+    state.err = `Reason "${name}" already exists.`; render(); return
+  }
+  try {
+    const { data, error } = await state.supabase.from('fusing_reasons')
+      .insert({ name, category, is_default: false }).select().single()
+    if (error) throw error
+    state.fReasons.push(data); render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+async function fDeleteReason(id) {
+  if (state.fReasons.length <= 1) { alert('Keep at least one fusing reason.'); return }
+  try {
+    const { error } = await state.supabase.from('fusing_reasons').delete().eq('id', id)
+    if (error) throw error
+    state.fReasons = state.fReasons.filter(x => x.id !== id); render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+async function fUpdateReason(id, changes, applyToHistory) {
+  try {
+    const existing = state.fReasons.find(r => r.id === id)
+    if (!existing) return
+    const payload = {}
+    if (changes.name && changes.name !== existing.name) payload.name = changes.name
+    if (changes.category && changes.category !== existing.category) payload.category = changes.category
+    if (Object.keys(payload).length === 0) return
+
+    const { data, error } = await state.supabase.from('fusing_reasons')
+      .update(payload).eq('id', id).select().single()
+    if (error) throw error
+    const idx = state.fReasons.findIndex(r => r.id === id)
+    if (idx >= 0) state.fReasons[idx] = data
+
+    if (applyToHistory) {
+      const evtUpdate = {}
+      if (payload.name) evtUpdate.reason_name = payload.name
+      if (payload.category) evtUpdate.reason_category = payload.category
+      if (Object.keys(evtUpdate).length > 0) {
+        const { error: evtErr } = await state.supabase.from('fusing_events')
+          .update(evtUpdate)
+          .eq('event_type', 'stoppage')
+          .eq('reason_name', existing.name)
+        if (evtErr) throw evtErr
+        if (state.fActiveSession) {
+          state.fEvents = await fbEvents(state.fActiveSession.id)
+        }
+      }
+    }
+    fEditingReasonId = null
+    render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+let fEditingReasonId = null
+function fSetEditingReason(id) { fEditingReasonId = id; render() }
+
+// ─── Fusing event edit/delete ───────────────────────────────────────────────
+let fEditingEventId = null
+function fSetEditingEvent(id) { fEditingEventId = id; render() }
+
+async function fUpdateEvent(eventId, changes) {
+  try {
+    const existing = state.fEvents.find(e => e.id === eventId)
+    if (!existing) return
+    const payload = {}
+    if (existing.event_type === 'stoppage' && changes.reason_name && changes.reason_category) {
+      payload.reason_name = changes.reason_name
+      payload.reason_category = changes.reason_category
+    }
+    if (typeof changes.duration_seconds === 'number') {
+      const newDur = Math.max(0, changes.duration_seconds)
+      payload.duration_seconds = newDur
+      payload.ended_at = new Date(new Date(existing.started_at).getTime() + newDur * 1000).toISOString()
+    }
+    if (Object.keys(payload).length === 0) return
+    const { data, error } = await state.supabase.from('fusing_events')
+      .update(payload).eq('id', eventId).select().single()
+    if (error) throw error
+    const idx = state.fEvents.findIndex(e => e.id === data.id)
+    if (idx >= 0) state.fEvents[idx] = data
+    fEditingEventId = null
+    render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+async function fDeleteEvent(eventId) {
+  try {
+    const { error } = await state.supabase.from('fusing_events').delete().eq('id', eventId)
+    if (error) throw error
+    state.fEvents = state.fEvents.filter(e => e.id !== eventId)
+    if (state.fCurrentPanel && state.fCurrentPanel.id === eventId) state.fCurrentPanel = null
+    if (state.fCurrentStoppage && state.fCurrentStoppage.id === eventId) state.fCurrentStoppage = null
+    render()
+  } catch (e) { state.err = e.message; render() }
+}
+
 async function startSession(form) {
   try {
     const payload = {
@@ -1470,8 +1571,41 @@ function fRenderActive() {
   const currentPanelDur = state.fCurrentPanel ? (now - new Date(state.fCurrentPanel.started_at)) / 1000 : 0
   const currentStoppageDur = state.fCurrentStoppage ? (now - new Date(state.fCurrentStoppage.started_at)) / 1000 : 0
   const totalStoppageTime = stoppageTimeFinished + currentStoppageDur
+  const totalPanelTime = panelTimeFinished + currentPanelDur
 
-  const uptimeSec = Math.max(0, sessionSec - totalStoppageTime)
+  // ─── Untagged idle gap calculation ──────────────────────────────────────
+  // Walk every event in the bundle (panels + stoppages) treating each as a
+  // [start, end] interval. Sum the time NOT covered by any interval — that's
+  // the operator's untagged idle time between actions.
+  // Gaps shorter than IDLE_THRESHOLD are ignored (normal handling between panels).
+  const IDLE_THRESHOLD_SEC = 5
+  const allIntervals = state.fEvents.map(e => ({
+    start: new Date(e.started_at),
+    end: e.ended_at ? new Date(e.ended_at) : now,
+  })).sort((a, b) => a.start - b.start)
+
+  const sessionStart = new Date(s.started_at)
+  let cursor = sessionStart
+  let untaggedIdleSec = 0
+  for (const iv of allIntervals) {
+    if (iv.start > cursor) {
+      const gapSec = (iv.start - cursor) / 1000
+      if (gapSec >= IDLE_THRESHOLD_SEC) untaggedIdleSec += gapSec
+    }
+    if (iv.end > cursor) cursor = iv.end
+  }
+  // Trailing gap from last event's end to "now" (only counts if no event is open)
+  if (!state.fCurrentPanel && !state.fCurrentStoppage && now > cursor) {
+    const trailing = (now - cursor) / 1000
+    if (trailing >= IDLE_THRESHOLD_SEC) untaggedIdleSec += trailing
+  }
+
+  // "Productive idle" is the press running with panel events happening at a healthy rate.
+  // We don't separate that out — operators tap Panel for active loading and any
+  // gap above threshold counts as untagged idle. Tune IDLE_THRESHOLD_SEC if needed.
+
+  const totalDowntimeSec = totalStoppageTime + untaggedIdleSec
+  const uptimeSec = Math.max(0, sessionSec - totalDowntimeSec)
   const uptimePct = sessionSec > 0 ? (uptimeSec / sessionSec) * 100 : 100
   const panelsCount = panels.length
   const avgCycleSec = completedPanels.length > 0 ? panelTimeFinished / completedPanels.length : 0
@@ -1491,7 +1625,12 @@ function fRenderActive() {
   completedStoppages.forEach(e => { breakdown[e.reason_name] = (breakdown[e.reason_name] || 0) + (e.duration_seconds || 0) })
   if (state.fCurrentStoppage) breakdown[state.fCurrentStoppage.reason_name] = (breakdown[state.fCurrentStoppage.reason_name] || 0) + currentStoppageDur
 
+  // Inject untagged idle as a synthetic reason (rendered as Method)
+  const IDLE_REASON_NAME = 'Idle (untagged)'
+  if (untaggedIdleSec > 0) breakdown[IDLE_REASON_NAME] = untaggedIdleSec
+
   const fGetCategory = name => {
+    if (name === IDLE_REASON_NAME) return 'method'
     const r = state.fReasons.find(x => x.name === name)
     return r ? r.category : 'method'
   }
@@ -1548,9 +1687,9 @@ function fRenderActive() {
         ${s.panel_count_planned ? `<div class="stat-sub">of ${s.panel_count_planned} planned</div>` : ''}
       </div>
       <div class="stat">
-        <div class="stat-label">Total stoppage time</div>
-        <div class="stat-value">${fmtDuration(totalStoppageTime)}</div>
-        <div class="stat-sub">${Math.round(uptimePct)}% uptime</div>
+        <div class="stat-label">Total downtime</div>
+        <div class="stat-value">${fmtDuration(totalDowntimeSec)}</div>
+        <div class="stat-sub">${Math.round(uptimePct)}% uptime · ${fmtDuration(untaggedIdleSec)} untagged</div>
       </div>
       <div class="stat">
         <div class="stat-label">Avg cycle time</div>
@@ -1575,10 +1714,10 @@ function fRenderActive() {
     ` : ''}
 
     <div class="card-title">Pareto analysis</div>
-    ${renderParetoFusing(breakdown, totalStoppageTime, fGetCategory)}
+    ${renderParetoFusing(breakdown, totalDowntimeSec, fGetCategory)}
 
     <div class="card-title" style="margin-top:1.5rem;">Fishbone: 4M</div>
-    ${renderFishboneFusing(breakdown, totalStoppageTime, fGetCategory)}
+    ${renderFishboneFusing(breakdown, totalDowntimeSec, fGetCategory)}
 
     <div class="flex between" style="margin:1.5rem 0 10px;">
       <div class="card-title" style="margin:0;">Event log</div>
@@ -1602,7 +1741,43 @@ function fRenderEventLog() {
     const icon = isPanel ? '▢' : '⏸'
     const label = isPanel ? `Panel #${e._num}` : esc(e.reason_name)
     const color = isPanel ? 'var(--success-text)' : (ongoing ? 'var(--warning-text)' : 'var(--text)')
-    return `<div class="table-row" style="grid-template-columns: auto 1fr auto auto auto;">
+    const isEditing = fEditingEventId === e.id
+
+    if (isEditing && !ongoing) {
+      // Inline edit form. Stoppages can change reason + duration; panels only duration.
+      let reasonField = ''
+      if (!isPanel) {
+        const reasonOpts = state.fReasons.map(r =>
+          `<option value="${r.id}" ${r.name === e.reason_name ? 'selected' : ''}>${esc(r.name)} (${CATEGORIES[r.category].label})</option>`
+        ).join('')
+        reasonField = `<div>
+            <label class="inline">Reason</label>
+            <select data-f-edit-event-reason="${e.id}">${reasonOpts}</select>
+          </div>`
+      }
+      return `<div style="padding: 10px 0; border-bottom: 0.5px solid var(--border); background: var(--surface-2); padding-left: 8px; padding-right: 8px; border-radius: 6px;">
+        <div style="font-size: 12px; color: var(--text-2); margin-bottom: 8px;">Editing ${isPanel ? 'panel cycle' : 'stoppage'} from ${fmtTime(e.started_at)}</div>
+        <div class="grid" style="grid-template-columns: ${isPanel ? '1fr' : '2fr 1fr'}; gap: 8px; margin-bottom: 8px;">
+          ${reasonField}
+          <div>
+            <label class="inline">Duration (seconds)</label>
+            <input type="number" min="0" step="1" data-f-edit-event-duration="${e.id}" value="${Math.round(dur)}" />
+          </div>
+        </div>
+        <div class="flex" style="gap: 6px; justify-content: flex-end;">
+          <button data-f-cancel-event-edit="${e.id}" class="btn-ghost">Cancel</button>
+          <button data-f-save-event-edit="${e.id}" class="btn-success" style="padding: 6px 14px;">Save</button>
+        </div>
+      </div>`
+    }
+
+    const actionBtns = ongoing ? '' : `
+      <button class="btn-ghost" data-f-edit-event="${e.id}" style="padding: 2px 8px; font-size: 12px;">Edit</button>
+      <button class="btn-ghost" data-f-delete-event="${e.id}" style="padding: 2px 8px; font-size: 12px; color: var(--danger-text);">×</button>
+    `
+    const cols = ongoing ? 'auto 1fr auto auto auto' : 'auto 1fr auto auto auto auto auto'
+
+    return `<div class="table-row" style="grid-template-columns: ${cols};">
       <div style="color: ${color}; font-weight: 500;">${icon}</div>
       <div>${label}</div>
       <div class="muted tabular">${fmtTime(e.started_at)}</div>
@@ -1610,6 +1785,7 @@ function fRenderEventLog() {
         ${ongoing ? 'ongoing' : fmtTime(e.ended_at)}
       </div>
       <div class="muted tabular" style="min-width:60px; text-align:right;">${fmtDuration(dur)}</div>
+      ${actionBtns}
     </div>`
   }).join('')}</div>`
 }
@@ -1653,15 +1829,56 @@ function fRenderHistory() {
 }
 
 function fRenderReasonsView() {
-  return `<div class="card-title">Fusing stoppage reasons</div>
-    <div class="sub muted" style="margin-bottom:12px;">Each reason is tagged with a 4M category. Editing comes in Phase 2.</div>
+  return `<div class="card-title">Manage fusing stoppage reasons</div>
+    <div class="sub muted" style="margin-bottom:12px;">Each reason is tagged with a 4M category so the Pareto and fishbone group correctly. Add reasons your floor uses regularly.</div>
+    <div class="card-surface">
+      <div class="card-title">Add new reason</div>
+      <div class="flex" style="gap:8px; flex-wrap:wrap;">
+        <input class="grow" id="fr-name" placeholder="e.g. Cleaning belt" style="min-width:200px;" />
+        <select id="fr-cat">
+          <option value="man">Man</option>
+          <option value="material">Material</option>
+          <option value="method" selected>Method</option>
+          <option value="nature">Machine</option>
+        </select>
+        <button id="fr-add">Add</button>
+      </div>
+    </div>
     <div class="log-box" style="max-height:none;">
       ${state.fReasons.map(r => {
         const cat = CATEGORIES[r.category]
-        return `<div class="table-row" style="grid-template-columns:1fr auto auto;">
+        if (fEditingReasonId === r.id) {
+          const catOpts = ['man', 'material', 'method', 'nature']
+            .map(k => `<option value="${k}" ${k === r.category ? 'selected' : ''}>${CATEGORIES[k].label}</option>`)
+            .join('')
+          return `<div style="padding: 10px 0; border-bottom: 0.5px solid var(--border); background: var(--surface-2); padding-left: 8px; padding-right: 8px; border-radius: 6px;">
+            <div style="font-size: 12px; color: var(--text-2); margin-bottom: 8px;">Editing: ${esc(r.name)}</div>
+            <div class="grid" style="grid-template-columns: 2fr 1fr; gap: 8px; margin-bottom: 8px;">
+              <div>
+                <label class="inline">Reason name</label>
+                <input data-f-edit-reason-name="${r.id}" value="${esc(r.name)}" />
+              </div>
+              <div>
+                <label class="inline">Category</label>
+                <select data-f-edit-reason-cat="${r.id}">${catOpts}</select>
+              </div>
+            </div>
+            <label class="flex" style="gap: 6px; font-size: 13px; color: var(--text-2); margin-bottom: 10px; cursor: pointer;">
+              <input type="checkbox" data-f-edit-reason-history="${r.id}" checked style="width: auto;" />
+              Also update past stoppages with this reason
+            </label>
+            <div class="flex" style="gap: 6px; justify-content: flex-end;">
+              <button data-f-cancel-reason-edit="${r.id}" class="btn-ghost">Cancel</button>
+              <button data-f-save-reason-edit="${r.id}" class="btn-success" style="padding: 6px 14px;">Save</button>
+            </div>
+          </div>`
+        }
+        return `<div class="table-row" style="grid-template-columns:1fr auto auto auto auto;">
           <div style="font-weight:500;">${esc(r.name)}</div>
           <div class="pill" style="background:${cat.fill}; color:${cat.dark};">${cat.label}</div>
           <div class="muted" style="font-size:12px;">${r.is_default ? 'default' : 'custom'}</div>
+          <button class="btn-ghost" data-f-edit-reason="${r.id}" style="padding: 2px 8px; font-size: 12px;">Edit</button>
+          <button class="btn-ghost" data-f-del-reason="${r.id}" ${state.fReasons.length <= 1 ? 'disabled' : ''} style="padding: 2px 8px; font-size: 12px; color: var(--danger-text);">×</button>
         </div>`
       }).join('')}
     </div>`
@@ -1891,6 +2108,90 @@ function wireEvents() {
     b.onclick = () => {
       const r = state.fReasons.find(x => x.id === b.dataset.fReasonId)
       if (r) fStartStoppage(r)
+    }
+  })
+
+  // Fusing reasons CRUD
+  const frAdd = document.getElementById('fr-add')
+  if (frAdd) {
+    frAdd.onclick = () => {
+      const name = document.getElementById('fr-name').value.trim()
+      const cat = document.getElementById('fr-cat').value
+      fAddReason(name, cat)
+      document.getElementById('fr-name').value = ''
+    }
+  }
+  document.querySelectorAll('[data-f-del-reason]').forEach(b => {
+    b.onclick = () => {
+      const id = b.dataset.fDelReason
+      const r = state.fReasons.find(x => x.id === id)
+      if (!r) return
+      if (confirm(`Delete reason "${r.name}"?\n\nPast stoppages with this name keep their data.`)) {
+        fDeleteReason(id)
+      }
+    }
+  })
+  document.querySelectorAll('[data-f-edit-reason]').forEach(b => {
+    b.onclick = () => fSetEditingReason(b.dataset.fEditReason)
+  })
+  document.querySelectorAll('[data-f-cancel-reason-edit]').forEach(b => {
+    b.onclick = () => fSetEditingReason(null)
+  })
+  document.querySelectorAll('[data-f-save-reason-edit]').forEach(b => {
+    b.onclick = () => {
+      const id = b.dataset.fSaveReasonEdit
+      const nameEl = document.querySelector(`[data-f-edit-reason-name="${id}"]`)
+      const catEl = document.querySelector(`[data-f-edit-reason-cat="${id}"]`)
+      const histEl = document.querySelector(`[data-f-edit-reason-history="${id}"]`)
+      const newName = nameEl.value.trim()
+      if (!newName) { alert('Name cannot be empty.'); return }
+      const dup = state.fReasons.find(r => r.id !== id && r.name.toLowerCase() === newName.toLowerCase())
+      if (dup) { alert(`Another reason already uses the name "${newName}".`); return }
+      fUpdateReason(id, { name: newName, category: catEl.value }, histEl.checked)
+    }
+  })
+
+  // Fusing event edit/delete
+  document.querySelectorAll('[data-f-edit-event]').forEach(b => {
+    b.onclick = () => fSetEditingEvent(b.dataset.fEditEvent)
+  })
+  document.querySelectorAll('[data-f-delete-event]').forEach(b => {
+    b.onclick = () => {
+      const id = b.dataset.fDeleteEvent
+      const e = state.fEvents.find(x => x.id === id)
+      const label = e ? (e.event_type === 'panel' ? 'this panel cycle' : `${e.reason_name} (${fmtDuration(e.duration_seconds || 0)})`) : 'this event'
+      if (confirm(`Delete ${label}?`)) fDeleteEvent(id)
+    }
+  })
+  document.querySelectorAll('[data-f-cancel-event-edit]').forEach(b => {
+    b.onclick = () => fSetEditingEvent(null)
+  })
+  document.querySelectorAll('[data-f-save-event-edit]').forEach(b => {
+    b.onclick = () => {
+      const id = b.dataset.fSaveEventEdit
+      const existing = state.fEvents.find(e => e.id === id)
+      if (!existing) return
+      const durEl = document.querySelector(`[data-f-edit-event-duration="${id}"]`)
+      const reasonEl = document.querySelector(`[data-f-edit-event-reason="${id}"]`)
+      const newDur = parseFloat(durEl.value)
+      const changes = {}
+      const durChanged = !isNaN(newDur) && Math.abs(newDur - (existing.duration_seconds || 0)) > 0.5
+      if (reasonEl) {
+        const r = state.fReasons.find(x => x.id === reasonEl.value)
+        if (r && r.name !== existing.reason_name) {
+          changes.reason_name = r.name
+          changes.reason_category = r.category
+        }
+      }
+      if (durChanged) {
+        const oldFmt = fmtDuration(existing.duration_seconds || 0)
+        const newFmt = fmtDuration(newDur)
+        if (!confirm(`Change duration from ${oldFmt} to ${newFmt}?`)) return
+        changes.duration_seconds = newDur
+      }
+      if (Object.keys(changes).length === 0) { fSetEditingEvent(null); return }
+      fEditingEventId = null
+      fUpdateEvent(id, changes)
     }
   })
 
