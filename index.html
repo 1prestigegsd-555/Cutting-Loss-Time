@@ -197,8 +197,10 @@ const state = {
   fEvents: [],
   fCurrentPanel: null,
   fCurrentStoppage: null,
-  fView: 'list',
+  fView: 'list',        // list | active | history | detail | insights | reasons
   fViewSessionId: null,
+  fInsightsRange: 'week',
+  fInsightsData: null,
 
   // ── Shared ─────────────────────────────────────────────────────────────
   err: '',
@@ -1805,6 +1807,77 @@ function renderFishboneFusing(breakdown, total, getCat) {
   return result
 }
 
+// Compute the metrics for a fusing bundle from its session record + events.
+// Used by the active session view, the historical detail view, and Insights aggregation.
+function computeFusingMetrics(session, events) {
+  const now = new Date()
+  const start = new Date(session.started_at)
+  const end = session.ended_at ? new Date(session.ended_at) : now
+  const sessionSec = Math.max(0, (end - start) / 1000)
+
+  const panels = events.filter(e => e.event_type === 'panel')
+  const completedPanels = panels.filter(e => e.ended_at)
+  const stoppages = events.filter(e => e.event_type === 'stoppage')
+  const completedStoppages = stoppages.filter(e => e.ended_at)
+
+  const panelTimeFinished = completedPanels.reduce((a, e) => a + (e.duration_seconds || 0), 0)
+  const stoppageTimeFinished = completedStoppages.reduce((a, e) => a + (e.duration_seconds || 0), 0)
+
+  // Compute current durations only if session is still open
+  const isActive = !session.ended_at
+  const currentPanel = isActive ? panels.find(e => !e.ended_at) : null
+  const currentStoppage = isActive ? stoppages.find(e => !e.ended_at) : null
+  const currentPanelDur = currentPanel ? (now - new Date(currentPanel.started_at)) / 1000 : 0
+  const currentStoppageDur = currentStoppage ? (now - new Date(currentStoppage.started_at)) / 1000 : 0
+  const totalStoppageTime = stoppageTimeFinished + currentStoppageDur
+  const totalPanelTime = panelTimeFinished + currentPanelDur
+
+  // Untagged idle gaps
+  const IDLE_THRESHOLD_SEC = 5
+  const intervals = events.map(e => ({
+    start: new Date(e.started_at),
+    end: e.ended_at ? new Date(e.ended_at) : (isActive ? now : end),
+  })).sort((a, b) => a.start - b.start)
+  let cursor = start
+  let untaggedIdleSec = 0
+  for (const iv of intervals) {
+    if (iv.start > cursor) {
+      const gap = (iv.start - cursor) / 1000
+      if (gap >= IDLE_THRESHOLD_SEC) untaggedIdleSec += gap
+    }
+    if (iv.end > cursor) cursor = iv.end
+  }
+  if (!currentPanel && !currentStoppage && end > cursor) {
+    const trailing = (end - cursor) / 1000
+    if (trailing >= IDLE_THRESHOLD_SEC) untaggedIdleSec += trailing
+  }
+
+  const totalDowntimeSec = totalStoppageTime + untaggedIdleSec
+  const uptimeSec = Math.max(0, sessionSec - totalDowntimeSec)
+  const uptimePct = sessionSec > 0 ? (uptimeSec / sessionSec) * 100 : 100
+  const panelsCount = panels.length
+  const completedPanelsCount = completedPanels.length
+  const avgCycleSec = completedPanelsCount > 0 ? panelTimeFinished / completedPanelsCount : 0
+
+  // Breakdown including untagged idle as a synthetic reason
+  const breakdown = {}
+  completedStoppages.forEach(e => { breakdown[e.reason_name] = (breakdown[e.reason_name] || 0) + (e.duration_seconds || 0) })
+  if (currentStoppage) breakdown[currentStoppage.reason_name] = (breakdown[currentStoppage.reason_name] || 0) + currentStoppageDur
+  const IDLE_REASON_NAME = 'Idle (untagged)'
+  if (untaggedIdleSec > 0) breakdown[IDLE_REASON_NAME] = untaggedIdleSec
+
+  const realignCount = stoppages.filter(e => /realign/i.test(e.reason_name || '')).length
+  const realignRate = panelsCount > 0 ? (realignCount / panelsCount) * 100 : 0
+  const waitingTime = Object.entries(breakdown).filter(([name]) => /wait/i.test(name) && name !== IDLE_REASON_NAME).reduce((a, [, dur]) => a + dur, 0)
+
+  return {
+    sessionSec, totalPanelTime, totalStoppageTime, untaggedIdleSec, totalDowntimeSec,
+    uptimeSec, uptimePct, panelsCount, completedPanelsCount, avgCycleSec,
+    currentPanel, currentStoppage, currentPanelDur, currentStoppageDur,
+    breakdown, realignCount, realignRate, waitingTime, IDLE_REASON_NAME,
+  }
+}
+
 function fRenderHistory() {
   if (!state.fSessions.length) return `<div class="empty">No fusing bundles recorded yet.</div>`
   return `<div class="card-title">All bundles</div>
@@ -1813,19 +1886,245 @@ function fRenderHistory() {
         const sec = s.ended_at
           ? (new Date(s.ended_at) - new Date(s.started_at)) / 1000
           : (new Date() - new Date(s.started_at)) / 1000
-        return `<div class="table-row" style="grid-template-columns: 1fr auto auto; padding: 10px 0;">
+        return `<div class="table-row" data-f-view-id="${s.id}" style="grid-template-columns: 1fr auto auto auto; padding: 10px 0; cursor: pointer;">
           <div>
             <div style="font-weight:500;">${esc(s.name)}</div>
             <div class="muted" style="font-size:12px;">
-              ${esc(new Date(s.started_at).toLocaleString())}${s.operator ? ' · ' + esc(s.operator) : ''}${s.panel_count_planned ? ' · ' + s.panel_count_planned + ' planned' : ''}
+              ${esc(new Date(s.started_at).toLocaleString())}${s.operator ? ' · ' + esc(s.operator) : ''}${s.machine ? ' · ' + esc(s.machine) : ''}${s.panel_count_planned ? ' · ' + s.panel_count_planned + ' planned' : ''}
             </div>
           </div>
           <div class="tabular muted">${fmtDuration(sec)}</div>
           <div class="muted" style="font-size:12px;">${s.ended_at ? 'ended' : '<span style=color:var(--warning-text);font-weight:500;>open</span>'}</div>
+          <div class="muted" style="font-size:18px; padding: 0 4px;">→</div>
+        </div>`
+      }).join('')}
+    </div>`
+}
+
+function fRenderDetail() {
+  const s = state.fSessions.find(x => x.id === state.fViewSessionId)
+  if (!s) return `<div class="empty">Bundle not found.</div>`
+  // state.fEvents is loaded by viewFusingSession() before this renders
+  const m = computeFusingMetrics(s, state.fEvents)
+  const fGetCategory = name => {
+    if (name === m.IDLE_REASON_NAME) return 'method'
+    const r = state.fReasons.find(x => x.name === name)
+    return r ? r.category : 'method'
+  }
+
+  return `<button class="btn-ghost" id="f-back-btn" style="margin-bottom:10px;">← Back to bundles</button>
+    <div class="status-row">
+      <div>
+        <div class="status-label">Bundle · ${esc(s.name)}${s.operator ? ' · ' + esc(s.operator) : ''}${s.machine ? ' · ' + esc(s.machine) : ''}</div>
+        <div class="status-value">${s.ended_at ? 'Completed' : 'In progress'}</div>
+      </div>
+      <div style="text-align:right;">
+        <div class="status-label">Started</div>
+        <div class="status-value" style="font-size:15px;">${esc(new Date(s.started_at).toLocaleString())}</div>
+      </div>
+    </div>
+
+    <div class="card-title">Bundle summary</div>
+    <div class="grid grid-4" style="margin-bottom:1.25rem;">
+      <div class="stat">
+        <div class="stat-label">Total duration</div>
+        <div class="stat-value">${fmtDuration(m.sessionSec)}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Panels fused</div>
+        <div class="stat-value">${m.completedPanelsCount}</div>
+        ${s.panel_count_planned ? `<div class="stat-sub">of ${s.panel_count_planned} planned</div>` : ''}
+      </div>
+      <div class="stat">
+        <div class="stat-label">Total downtime</div>
+        <div class="stat-value">${fmtDuration(m.totalDowntimeSec)}</div>
+        <div class="stat-sub">${Math.round(m.uptimePct)}% uptime · ${fmtDuration(m.untaggedIdleSec)} untagged</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Avg cycle time</div>
+        <div class="stat-value">${m.avgCycleSec > 0 ? m.avgCycleSec.toFixed(1) + 's' : '—'}</div>
+        <div class="stat-sub">per panel</div>
+      </div>
+    </div>
+
+    ${(m.realignCount > 0 || m.waitingTime > 0) ? `
+      <div class="grid grid-2" style="margin-bottom: 1.25rem;">
+        <div class="stat">
+          <div class="stat-label">Realigning rate</div>
+          <div class="stat-value">${m.realignRate.toFixed(1)}%</div>
+          <div class="stat-sub">${m.realignCount} realigns / ${m.panelsCount} panels</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">Idle belt time</div>
+          <div class="stat-value">${fmtDuration(m.waitingTime)}</div>
+          <div class="stat-sub">tagged Waiting reason</div>
+        </div>
+      </div>
+    ` : ''}
+
+    <div class="card-title">Pareto analysis</div>
+    ${renderParetoFusing(m.breakdown, m.totalDowntimeSec, fGetCategory)}
+
+    <div class="card-title" style="margin-top:1.5rem;">Fishbone: 4M</div>
+    ${renderFishboneFusing(m.breakdown, m.totalDowntimeSec, fGetCategory)}
+
+    <div class="card-title" style="margin-top:1.5rem;">Event log</div>
+    ${fRenderEventLog()}`
+}
+
+async function fViewSession(id) {
+  try {
+    state.fViewSessionId = id
+    state.fEvents = await fbEvents(id)
+    state.fView = 'detail'
+    render()
+  } catch (e) { state.err = e.message; render() }
+}
+
+// ─── Fusing Insights ────────────────────────────────────────────────────────
+async function fLoadInsights() {
+  state.fInsightsData = { sessions: [], events: [], loading: true }
+  render()
+  try {
+    const fromIso = rangeStart(state.fInsightsRange).toISOString()
+    const { data: sessions, error: sErr } = await state.supabase
+      .from('fusing_sessions').select('*')
+      .gte('started_at', fromIso)
+      .order('started_at', { ascending: true })
+    if (sErr) throw sErr
+    if (!sessions || sessions.length === 0) {
+      state.fInsightsData = { sessions: [], events: [], loading: false }
+      render(); return
+    }
+    const ids = sessions.map(s => s.id)
+    const { data: events, error: eErr } = await state.supabase
+      .from('fusing_events').select('*')
+      .in('session_id', ids)
+    if (eErr) throw eErr
+    state.fInsightsData = { sessions, events: events || [], loading: false }
+    render()
+  } catch (e) {
+    state.err = e.message
+    state.fInsightsData = { sessions: [], events: [], loading: false }
+    render()
+  }
+}
+
+function fRenderInsights() {
+  const data = state.fInsightsData
+  const rangeLabels = { today: 'Today', week: 'Last 7 days', month: 'Last 30 days', all: 'All time' }
+  const ranges = ['today', 'week', 'month', 'all']
+  const tabs = ranges.map(r =>
+    `<button class="tab ${state.fInsightsRange === r ? 'active' : ''}" data-f-range="${r}">${rangeLabels[r]}</button>`
+  ).join('')
+
+  if (!data || data.loading) {
+    return `<div class="card-title">Fusing insights</div>
+      <div class="tabs" style="margin-bottom: 1rem;">${tabs}</div>
+      <div class="empty">Loading…</div>`
+  }
+  const sessions = data.sessions
+  const events = data.events
+  if (sessions.length === 0) {
+    return `<div class="card-title">Fusing insights</div>
+      <div class="tabs" style="margin-bottom: 1rem;">${tabs}</div>
+      <div class="empty">No bundles in this range.</div>`
+  }
+
+  // Per-bundle metrics
+  const eventsBySession = {}
+  events.forEach(e => {
+    if (!eventsBySession[e.session_id]) eventsBySession[e.session_id] = []
+    eventsBySession[e.session_id].push(e)
+  })
+  const bundleRows = sessions.map(s => {
+    const m = computeFusingMetrics(s, eventsBySession[s.id] || [])
+    return { session: s, m }
+  }).sort((a, b) => new Date(b.session.started_at) - new Date(a.session.started_at))
+
+  // Aggregate totals
+  let totalSessionSec = 0, totalUptimeSec = 0, totalDowntimeSec = 0, totalUntaggedIdle = 0
+  let totalPanels = 0, totalRealigns = 0
+  const aggBreakdown = {}
+  bundleRows.forEach(({ m }) => {
+    totalSessionSec += m.sessionSec
+    totalUptimeSec += m.uptimeSec
+    totalDowntimeSec += m.totalDowntimeSec
+    totalUntaggedIdle += m.untaggedIdleSec
+    totalPanels += m.completedPanelsCount
+    totalRealigns += m.realignCount
+    Object.entries(m.breakdown).forEach(([name, dur]) => {
+      aggBreakdown[name] = (aggBreakdown[name] || 0) + dur
+    })
+  })
+  const overallUptimePct = totalSessionSec > 0 ? (totalUptimeSec / totalSessionSec) * 100 : 0
+  const overallRealignRate = totalPanels > 0 ? (totalRealigns / totalPanels) * 100 : 0
+
+  const fGetCategory = name => {
+    if (name === 'Idle (untagged)') return 'method'
+    const r = state.fReasons.find(x => x.name === name)
+    return r ? r.category : 'method'
+  }
+
+  return `<div class="card-title">Fusing insights · ${rangeLabels[state.fInsightsRange]}</div>
+    <div class="tabs" style="margin-bottom: 1rem;">${tabs}</div>
+
+    <div class="grid grid-4" style="margin-bottom: 1.25rem;">
+      <div class="stat">
+        <div class="stat-label">Total bundle time</div>
+        <div class="stat-value">${fmtDuration(totalSessionSec)}</div>
+        <div class="stat-sub">across ${sessions.length} bundle${sessions.length === 1 ? '' : 's'}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Total downtime</div>
+        <div class="stat-value">${fmtDuration(totalDowntimeSec)}</div>
+        <div class="stat-sub">${fmtDuration(totalUntaggedIdle)} untagged</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Overall uptime</div>
+        <div class="stat-value">${Math.round(overallUptimePct)}%</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Panels fused</div>
+        <div class="stat-value">${totalPanels.toLocaleString()}</div>
+        <div class="stat-sub">${overallRealignRate.toFixed(1)}% realign rate</div>
+      </div>
+    </div>
+
+    <div class="card-title">Per-bundle detail</div>
+    <div class="log-box" style="max-height:none; overflow-x: auto;">
+      <div class="table-row" style="grid-template-columns: 1.5fr 0.7fr 0.7fr 0.7fr 0.7fr 0.7fr 0.8fr; font-weight: 500; font-size: 12px; color: var(--text-2); border-bottom: 0.5px solid var(--border-strong); position: sticky; top: 0; background: var(--surface);">
+        <div>Bundle</div>
+        <div style="text-align: right;">Panels</div>
+        <div style="text-align: right;">Uptime</div>
+        <div style="text-align: right;">Downtime</div>
+        <div style="text-align: right;">Untagged</div>
+        <div style="text-align: right;">Avg cycle</div>
+        <div style="text-align: right;">Uptime %</div>
+      </div>
+      ${bundleRows.map(({ session: s, m }) => {
+        const dateLabel = new Date(s.started_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+        return `<div class="table-row" data-f-view-id="${s.id}" style="grid-template-columns: 1.5fr 0.7fr 0.7fr 0.7fr 0.7fr 0.7fr 0.8fr; font-size: 13px; cursor: pointer;">
+          <div>
+            <div style="font-weight: 500;">${esc(s.name)}</div>
+            <div class="muted" style="font-size: 12px;">${dateLabel}${s.ended_at ? '' : ' · <span style="color:var(--warning-text);">open</span>'}</div>
+          </div>
+          <div class="tabular" style="text-align: right;">${m.completedPanelsCount}</div>
+          <div class="tabular" style="text-align: right;">${fmtDuration(m.uptimeSec)}</div>
+          <div class="tabular" style="text-align: right; color: ${m.totalDowntimeSec > 0 ? 'var(--text)' : 'var(--text-3)'};">${fmtDuration(m.totalDowntimeSec)}</div>
+          <div class="tabular" style="text-align: right; color: ${m.untaggedIdleSec > 60 ? 'var(--danger-text)' : 'var(--text-3)'};">${fmtDuration(m.untaggedIdleSec)}</div>
+          <div class="tabular" style="text-align: right;">${m.avgCycleSec > 0 ? m.avgCycleSec.toFixed(1) + 's' : '—'}</div>
+          <div class="tabular" style="text-align: right;">${Math.round(m.uptimePct)}%</div>
         </div>`
       }).join('')}
     </div>
-    <div class="muted" style="font-size: 12px; margin-top: 12px;">Detail view and Insights for fusing coming in Phase 2.</div>`
+
+    <div class="card-title" style="margin-top: 1.5rem;">Pareto — what's driving downtime</div>
+    ${renderParetoFusing(aggBreakdown, totalDowntimeSec, fGetCategory)}
+
+    <div class="card-title" style="margin-top: 1.5rem;">Fishbone — 4M view</div>
+    ${renderFishboneFusing(aggBreakdown, totalDowntimeSec, fGetCategory)}
+  `
 }
 
 function fRenderReasonsView() {
@@ -2026,13 +2325,16 @@ function render() {
     ` : `
       <div class="tabs">
         <button class="tab ${fView === 'list' || fView === 'active' ? 'active' : ''}" data-f-tab="${state.fActiveSession ? 'active' : 'list'}">${fTabLabel}</button>
-        <button class="tab ${fView === 'history' ? 'active' : ''}" data-f-tab="history">History</button>
+        <button class="tab ${fView === 'history' || fView === 'detail' ? 'active' : ''}" data-f-tab="history">History</button>
+        <button class="tab ${fView === 'insights' ? 'active' : ''}" data-f-tab="insights">Insights</button>
         <button class="tab ${fView === 'reasons' ? 'active' : ''}" data-f-tab="reasons">Reasons</button>
       </div>
       <div id="main-view">
         ${fView === 'list' ? fRenderStartForm() : ''}
         ${fView === 'active' && state.fActiveSession ? fRenderActive() : ''}
         ${fView === 'history' ? fRenderHistory() : ''}
+        ${fView === 'detail' ? fRenderDetail() : ''}
+        ${fView === 'insights' ? fRenderInsights() : ''}
         ${fView === 'reasons' ? fRenderReasonsView() : ''}
       </div>
     `}
@@ -2082,8 +2384,60 @@ function wireEvents() {
 
   // Fusing tab clicks
   document.querySelectorAll('[data-f-tab]').forEach(b => {
-    b.onclick = () => { state.fView = b.dataset.fTab; render() }
+    b.onclick = async () => {
+      const newView = b.dataset.fTab
+      const wasViewingDetail = state.fView === 'detail' && state.fViewSessionId
+      state.fView = newView
+      state.fViewSessionId = null
+      if (newView === 'insights') {
+        fLoadInsights()
+        return
+      }
+      // If we were in a detail view and now want active, reload the active session's events
+      if (wasViewingDetail && state.fActiveSession && (newView === 'active' || newView === 'list')) {
+        try {
+          state.fEvents = await fbEvents(state.fActiveSession.id)
+          state.fCurrentPanel = state.fEvents.find(e => e.event_type === 'panel' && !e.ended_at) || null
+          state.fCurrentStoppage = state.fEvents.find(e => e.event_type === 'stoppage' && !e.ended_at) || null
+        } catch (e) { state.err = e.message }
+      } else if (wasViewingDetail) {
+        state.fEvents = state.fActiveSession ? state.fEvents : []
+      }
+      render()
+    }
   })
+
+  // Fusing insights date-range tabs
+  document.querySelectorAll('[data-f-range]').forEach(b => {
+    b.onclick = () => {
+      state.fInsightsRange = b.dataset.fRange
+      fLoadInsights()
+    }
+  })
+
+  // Fusing history → click row to open detail
+  document.querySelectorAll('[data-f-view-id]').forEach(row => {
+    row.onclick = () => fViewSession(row.dataset.fViewId)
+  })
+
+  // Detail back button
+  const fBackBtn = document.getElementById('f-back-btn')
+  if (fBackBtn) fBackBtn.onclick = () => {
+    state.fView = state.fInsightsData ? 'insights' : 'history'
+    state.fViewSessionId = null
+    // If we have an active session, reload its events so the active view has fresh data
+    if (state.fActiveSession) {
+      fbEvents(state.fActiveSession.id).then(events => {
+        state.fEvents = events
+        state.fCurrentPanel = events.find(e => e.event_type === 'panel' && !e.ended_at) || null
+        state.fCurrentStoppage = events.find(e => e.event_type === 'stoppage' && !e.ended_at) || null
+        render()
+      }).catch(() => render())
+    } else {
+      state.fEvents = []
+      render()
+    }
+  }
 
   // Fusing start form
   const ffStart = document.getElementById('ff-start')
