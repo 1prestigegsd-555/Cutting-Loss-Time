@@ -1732,6 +1732,8 @@ function fRenderActive() {
       </div>
     </div>
 
+    ${fRenderPanelStats(state.fEvents)}
+
     ${(realignCount > 0 || waitingTime > 0) ? `
       <div class="grid grid-2" style="margin-bottom: 1.25rem;">
         <div class="stat">
@@ -1918,6 +1920,126 @@ function computeFusingMetrics(session, events) {
   }
 }
 
+// Compute statistical summary of completed panel Active times for a session.
+// Returns null if there are no completed panels. Otherwise returns:
+//   { n, mean, median, stdev, min, max, cv, outliers, sampleQuality }
+// where outliers is a list of panel indices whose duration is > 2σ from mean,
+// and sampleQuality is one of 'insufficient' | 'directional' | 'defensible'.
+function computePanelStats(events) {
+  const durations = events
+    .filter(e => e.event_type === 'panel' && e.ended_at && typeof e.duration_seconds === 'number')
+    .map(e => e.duration_seconds)
+  const n = durations.length
+  if (n === 0) return null
+
+  const mean = durations.reduce((a, b) => a + b, 0) / n
+  const sorted = [...durations].sort((a, b) => a - b)
+  const median = n % 2 === 1
+    ? sorted[(n - 1) / 2]
+    : (sorted[n / 2 - 1] + sorted[n / 2]) / 2
+  const variance = durations.reduce((a, b) => a + (b - mean) ** 2, 0) / n
+  const stdev = Math.sqrt(variance)
+  const min = sorted[0]
+  const max = sorted[n - 1]
+  const cv = mean > 0 ? (stdev / mean) * 100 : 0
+
+  // Outliers: > 2σ from mean. List the original (1-indexed) panel position.
+  let panelIdx = 0
+  const outliers = []
+  events.forEach(e => {
+    if (e.event_type === 'panel') {
+      panelIdx++
+      if (e.ended_at && typeof e.duration_seconds === 'number') {
+        if (Math.abs(e.duration_seconds - mean) > 2 * stdev && stdev > 0) {
+          outliers.push({ panel: panelIdx, duration: e.duration_seconds })
+        }
+      }
+    }
+  })
+
+  // Rule-of-thumb for sample quality:
+  //   < 10 observations: insufficient — don't set a target on this
+  //   10–24: directional — useful for planning, not for formal target-setting
+  //   25+:   defensible — enough to anchor a target on (assuming reasonable CV)
+  let sampleQuality
+  if (n < 10) sampleQuality = 'insufficient'
+  else if (n < 25) sampleQuality = 'directional'
+  else sampleQuality = 'defensible'
+
+  return { n, mean, median, stdev, min, max, cv, outliers, sampleQuality }
+}
+
+// Render a stats card for the work-study view. Used by both active and detail views.
+function fRenderPanelStats(events) {
+  const stats = computePanelStats(events)
+  if (!stats) return ''
+
+  const sampleColor = stats.sampleQuality === 'defensible' ? 'var(--success-text)'
+                    : stats.sampleQuality === 'directional' ? 'var(--warning-text)'
+                    : 'var(--danger-text)'
+  const sampleLabel = stats.sampleQuality === 'defensible' ? 'Defensible'
+                    : stats.sampleQuality === 'directional' ? 'Directional'
+                    : 'Insufficient'
+  const sampleHint = stats.sampleQuality === 'defensible' ? 'Enough observations to set a target on.'
+                    : stats.sampleQuality === 'directional' ? `${25 - stats.n} more observations recommended for a defensible target.`
+                    : `Need at least 10 observations before drawing conclusions; ${10 - stats.n} more to go.`
+
+  // Coefficient of variation interpretation
+  const cvColor = stats.cv < 15 ? 'var(--success-text)'
+                : stats.cv < 25 ? 'var(--warning-text)'
+                : 'var(--danger-text)'
+  const cvHint = stats.cv < 15 ? 'tight cluster — process is consistent'
+               : stats.cv < 25 ? 'moderate spread — usable but watch for outliers'
+               : 'high spread — process variation is too high for reliable targets'
+
+  const outlierBlock = stats.outliers.length > 0
+    ? `<div class="insight" style="margin-top: 10px;">
+        <strong>Outliers (>2σ from mean):</strong>
+        ${stats.outliers.slice(0, 5).map(o =>
+          `<span style="display: inline-block; margin-right: 8px;">Panel #${o.panel}: <span class="tabular">${o.duration.toFixed(1)}s</span></span>`
+        ).join('')}
+        ${stats.outliers.length > 5 ? `<span class="muted">+ ${stats.outliers.length - 5} more</span>` : ''}
+        <div class="muted" style="margin-top: 4px;">Investigate or exclude these before computing a standard time.</div>
+      </div>` : ''
+
+  return `
+    <div class="card-title" style="margin-top: 1.5rem;">Panel time statistics (Active)</div>
+    <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px;">
+      <div class="stat">
+        <div class="stat-label">Observations</div>
+        <div class="stat-value">${stats.n}</div>
+        <div class="stat-sub" style="color: ${sampleColor}; font-weight: 500;">${sampleLabel}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Mean</div>
+        <div class="stat-value">${stats.mean.toFixed(1)}s</div>
+        <div class="stat-sub">use as Observed Time</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Median</div>
+        <div class="stat-value">${stats.median.toFixed(1)}s</div>
+        <div class="stat-sub">middle value</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Std deviation</div>
+        <div class="stat-value">±${stats.stdev.toFixed(1)}s</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">CV</div>
+        <div class="stat-value" style="color: ${cvColor};">${stats.cv.toFixed(1)}%</div>
+        <div class="stat-sub">${cvHint}</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Range</div>
+        <div class="stat-value" style="font-size: 16px;">${stats.min.toFixed(1)}–${stats.max.toFixed(1)}s</div>
+        <div class="stat-sub">min–max</div>
+      </div>
+    </div>
+    <div class="insight" style="margin-top: 8px;">${sampleHint}</div>
+    ${outlierBlock}
+  `
+}
+
 function fRenderHistory() {
   if (!state.fSessions.length) return `<div class="empty">No fusing bundles recorded yet.</div>`
   return `<div class="card-title">All bundles</div>
@@ -2005,6 +2127,8 @@ function fRenderDetail() {
         <div class="stat-sub">per-panel throughput</div>
       </div>
     </div>
+
+    ${fRenderPanelStats(state.fEvents)}
 
     ${(m.realignCount > 0 || m.waitingTime > 0) ? `
       <div class="grid grid-2" style="margin-bottom: 1.25rem;">
