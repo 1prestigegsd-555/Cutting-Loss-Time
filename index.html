@@ -435,6 +435,24 @@ async function fEndSession() {
   } catch (e) { state.err = e.message; render() }
 }
 
+// Update performance rating and/or allowance on a session.
+// Used by the Standard time calculator card.
+async function fUpdateWorkStudy(sessionId, fields) {
+  try {
+    const payload = {}
+    if (fields.performance_rating_pct !== undefined) payload.performance_rating_pct = fields.performance_rating_pct
+    if (fields.allowance_pct !== undefined) payload.allowance_pct = fields.allowance_pct
+    if (Object.keys(payload).length === 0) return
+    const { data, error } = await state.supabase.from('fusing_sessions')
+      .update(payload).eq('id', sessionId).select().single()
+    if (error) throw error
+    const idx = state.fSessions.findIndex(s => s.id === data.id)
+    if (idx >= 0) state.fSessions[idx] = data
+    if (state.fActiveSession && state.fActiveSession.id === data.id) state.fActiveSession = data
+    render()
+  } catch (e) { state.err = e.message; render() }
+}
+
 // Explicit two-tap workflow: Start panel begins a cycle, End panel closes it.
 // If a stoppage occurs mid-panel, the stoppage auto-closes the active panel
 // (preserves current behaviour — operators don't have to End first).
@@ -1734,6 +1752,8 @@ function fRenderActive() {
 
     ${fRenderPanelStats(state.fEvents)}
 
+    ${fRenderStandardTime(s, state.fEvents)}
+
     ${(realignCount > 0 || waitingTime > 0) ? `
       <div class="grid grid-2" style="margin-bottom: 1.25rem;">
         <div class="stat">
@@ -1966,7 +1986,15 @@ function computePanelStats(events) {
   else if (n < 25) sampleQuality = 'directional'
   else sampleQuality = 'defensible'
 
-  return { n, mean, median, stdev, min, max, cv, outliers, sampleQuality }
+  // Mean excluding outliers (>2σ from raw mean).
+  // This is the recommended Observed Time for setting a Standard.
+  const cleanDurations = durations.filter(d => Math.abs(d - mean) <= 2 * stdev || stdev === 0)
+  const cleanN = cleanDurations.length
+  const trimmedMean = cleanN > 0
+    ? cleanDurations.reduce((a, b) => a + b, 0) / cleanN
+    : mean
+
+  return { n, mean, median, stdev, min, max, cv, outliers, sampleQuality, trimmedMean, cleanN }
 }
 
 // Render a stats card for the work-study view. Used by both active and detail views.
@@ -2037,6 +2065,94 @@ function fRenderPanelStats(events) {
     </div>
     <div class="insight" style="margin-top: 8px;">${sampleHint}</div>
     ${outlierBlock}
+  `
+}
+
+// Render the Standard Time calculator card. Takes a session record (for the
+// stored rating + allowance) and the events array (to compute observed time).
+// Inputs are editable; on save they're persisted to fusing_sessions.
+function fRenderStandardTime(session, events) {
+  const stats = computePanelStats(events)
+  if (!stats) return ''
+  const observed = stats.trimmedMean
+  if (observed <= 0) return ''
+
+  // Defaults if not yet set: rating = 100% (unrated), allowance = 13% (typical PF&D)
+  const ratingPct = session.performance_rating_pct != null ? Number(session.performance_rating_pct) : 100
+  const allowancePct = session.allowance_pct != null ? Number(session.allowance_pct) : 13
+  const isSet = session.performance_rating_pct != null || session.allowance_pct != null
+
+  const basicTime = observed * (ratingPct / 100)
+  const standardTime = basicTime * (1 + allowancePct / 100)
+  const panelsPerHour = standardTime > 0 ? 3600 / standardTime : 0
+  const panelsPerShift = panelsPerHour * 8  // assumes 8-hour productive shift
+
+  // Sample-quality colour for the recommendation banner
+  const reliable = stats.sampleQuality === 'defensible' && stats.cv < 25
+  const banner = reliable
+    ? `<div class="insight" style="color: var(--success-text);"><strong>Sample is defensible.</strong> The standard time below is suitable for setting an operator target.</div>`
+    : stats.sampleQuality === 'directional'
+    ? `<div class="insight" style="color: var(--warning-text);"><strong>Directional only.</strong> ${25 - stats.n} more observations recommended before locking this in as a target.</div>`
+    : stats.sampleQuality === 'insufficient'
+    ? `<div class="insight" style="color: var(--danger-text);"><strong>Insufficient data.</strong> Need ${10 - stats.n} more panels before this standard is meaningful.</div>`
+    : `<div class="insight" style="color: var(--warning-text);"><strong>High variance (CV ${stats.cv.toFixed(1)}%).</strong> Reduce process variation before relying on this standard.</div>`
+
+  return `
+    <div class="card-title" style="margin-top: 1.5rem;">Standard time calculator</div>
+    <div class="card-surface">
+      <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; align-items: end;">
+        <div>
+          <div class="stat-label">Observed time</div>
+          <div class="stat-value">${observed.toFixed(1)}s</div>
+          <div class="stat-sub">trimmed mean${stats.outliers.length > 0 ? ` (${stats.outliers.length} outlier${stats.outliers.length === 1 ? '' : 's'} excluded)` : ''}</div>
+        </div>
+        <div>
+          <label class="inline">× Performance rating</label>
+          <div class="flex" style="gap: 4px;">
+            <input type="number" min="50" max="150" step="1" data-f-rating="${session.id}" value="${ratingPct}" style="text-align: right;" />
+            <span style="padding: 8px 4px; color: var(--text-2);">%</span>
+          </div>
+          <div class="stat-sub">100 = standard pace</div>
+        </div>
+        <div>
+          <div class="stat-label">= Basic time</div>
+          <div class="stat-value">${basicTime.toFixed(1)}s</div>
+        </div>
+        <div>
+          <label class="inline">× (1 + Allowance)</label>
+          <div class="flex" style="gap: 4px;">
+            <input type="number" min="0" max="50" step="0.5" data-f-allowance="${session.id}" value="${allowancePct}" style="text-align: right;" />
+            <span style="padding: 8px 4px; color: var(--text-2);">%</span>
+          </div>
+          <div class="stat-sub">PF&D total</div>
+        </div>
+        <div style="padding: 12px; background: var(--surface); border-radius: 8px; border: 1px solid var(--border-strong);">
+          <div class="stat-label">= Standard time</div>
+          <div class="stat-value" style="font-size: 24px;">${standardTime.toFixed(1)}s</div>
+          <div class="stat-sub">per panel</div>
+        </div>
+      </div>
+
+      <div class="flex" style="gap: 8px; margin-top: 16px; align-items: center;">
+        <button id="f-ws-save-${session.id}" class="btn-success" style="padding: 8px 18px;">Save rating &amp; allowance</button>
+        <span id="f-ws-status-${session.id}" class="muted" style="font-size: 12px;">${isSet ? 'Saved values shown above. Edit and save to update.' : 'Using defaults. Save to persist your values.'}</span>
+      </div>
+
+      <div class="grid grid-2" style="margin-top: 16px; gap: 12px;">
+        <div class="stat">
+          <div class="stat-label">Capacity at this standard</div>
+          <div class="stat-value">${Math.round(panelsPerHour).toLocaleString()}</div>
+          <div class="stat-sub">panels/hour at 100% utilisation</div>
+        </div>
+        <div class="stat">
+          <div class="stat-label">8-hour shift output</div>
+          <div class="stat-value">${Math.round(panelsPerShift).toLocaleString()}</div>
+          <div class="stat-sub">panels (no allowances on shift time)</div>
+        </div>
+      </div>
+
+      <div style="margin-top: 12px;">${banner}</div>
+    </div>
   `
 }
 
@@ -2129,6 +2245,8 @@ function fRenderDetail() {
     </div>
 
     ${fRenderPanelStats(state.fEvents)}
+
+    ${fRenderStandardTime(s, state.fEvents)}
 
     ${(m.realignCount > 0 || m.waitingTime > 0) ? `
       <div class="grid grid-2" style="margin-bottom: 1.25rem;">
@@ -2683,6 +2801,53 @@ function wireEvents() {
     b.onclick = () => {
       const r = state.fReasons.find(x => x.id === b.dataset.fReasonId)
       if (r) fStartStoppage(r)
+    }
+  })
+
+  // Standard time calculator: live preview and save
+  // Inputs use data-f-rating="<sessionId>" and data-f-allowance="<sessionId>"
+  // The save button has id f-ws-save-<sessionId>
+  document.querySelectorAll('[data-f-rating], [data-f-allowance]').forEach(input => {
+    const sessionId = input.dataset.fRating || input.dataset.fAllowance
+    input.addEventListener('input', () => {
+      // Live preview without writing to DB. Recompute the displayed numbers.
+      const ratingEl = document.querySelector(`[data-f-rating="${sessionId}"]`)
+      const allowanceEl = document.querySelector(`[data-f-allowance="${sessionId}"]`)
+      if (!ratingEl || !allowanceEl) return
+      const rating = parseFloat(ratingEl.value)
+      const allowance = parseFloat(allowanceEl.value)
+      if (isNaN(rating) || isNaN(allowance)) return
+      // Mark unsaved so user knows to hit Save
+      const status = document.getElementById(`f-ws-status-${sessionId}`)
+      if (status) {
+        status.textContent = 'Unsaved changes — hit Save to persist.'
+        status.style.color = 'var(--warning-text)'
+      }
+    })
+  })
+  document.querySelectorAll('[id^="f-ws-save-"]').forEach(btn => {
+    const sessionId = btn.id.replace('f-ws-save-', '')
+    btn.onclick = async () => {
+      const ratingEl = document.querySelector(`[data-f-rating="${sessionId}"]`)
+      const allowanceEl = document.querySelector(`[data-f-allowance="${sessionId}"]`)
+      if (!ratingEl || !allowanceEl) return
+      const rating = parseFloat(ratingEl.value)
+      const allowance = parseFloat(allowanceEl.value)
+      if (isNaN(rating) || rating < 50 || rating > 150) {
+        alert('Performance rating must be between 50% and 150%.')
+        return
+      }
+      if (isNaN(allowance) || allowance < 0 || allowance > 50) {
+        alert('Allowance must be between 0% and 50%.')
+        return
+      }
+      btn.disabled = true
+      btn.textContent = 'Saving…'
+      await fUpdateWorkStudy(sessionId, {
+        performance_rating_pct: rating,
+        allowance_pct: allowance,
+      })
+      // Render will re-run and reset the button
     }
   })
 
