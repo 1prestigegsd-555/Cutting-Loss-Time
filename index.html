@@ -1157,7 +1157,7 @@ function renderPareto(breakdown, totalDown) {
   let bars = '', labels = ''
   entries.forEach(([name, dur], i) => {
     const cat = CATEGORIES[getCategory(name)]
-    const barH = (dur / maxVal) * plotH
+    const barH = Math.max(0, (dur / maxVal) * plotH)
     const x = padL + i * (barW + barGap)
     const y = padT + plotH - barH
     const pct = Math.round((dur / totalDown) * 100)
@@ -1649,7 +1649,7 @@ function fRenderActive() {
   const panelTimeFinished = completedPanels.reduce((a, e) => a + (e.duration_seconds || 0), 0)
   const stoppageTimeFinished = completedStoppages.reduce((a, e) => a + (e.duration_seconds || 0), 0)
   const currentPanelDur = state.fCurrentPanel ? fPanelActiveSeconds(state.fCurrentPanel, now) : 0
-  const currentStoppageDur = state.fCurrentStoppage ? (now - new Date(state.fCurrentStoppage.started_at)) / 1000 : 0
+  const currentStoppageDur = state.fCurrentStoppage ? Math.max(0, (now - new Date(state.fCurrentStoppage.started_at)) / 1000) : 0
   const totalStoppageTime = stoppageTimeFinished + currentStoppageDur
   const totalPanelTime = panelTimeFinished + currentPanelDur
 
@@ -1943,7 +1943,7 @@ function computeFusingMetrics(session, events) {
   const currentPanel = isActive ? panels.find(e => !e.ended_at) : null
   const currentStoppage = isActive ? stoppages.find(e => !e.ended_at) : null
   const currentPanelDur = currentPanel ? fPanelActiveSeconds(currentPanel, now) : 0
-  const currentStoppageDur = currentStoppage ? (now - new Date(currentStoppage.started_at)) / 1000 : 0
+  const currentStoppageDur = currentStoppage ? Math.max(0, (now - new Date(currentStoppage.started_at)) / 1000) : 0
   const totalStoppageTime = stoppageTimeFinished + currentStoppageDur
   const totalPanelTime = panelTimeFinished + currentPanelDur
 
