@@ -463,6 +463,7 @@ async function fStartPanel() {
   try {
     const { data, error } = await state.supabase.from('fusing_events').insert({
       session_id: state.fActiveSession.id, event_type: 'panel',
+      paused_seconds: 0,
     }).select().single()
     if (error) throw error
     state.fEvents.push(data)
@@ -471,13 +472,40 @@ async function fStartPanel() {
   } catch (e) { state.err = e.message; render() }
 }
 
+// Compute the panel's true Active time at the given moment, excluding paused time.
+// Handles the case where the panel is currently paused (paused_at is set).
+function fPanelActiveSeconds(panel, asOf) {
+  if (!panel) return 0
+  const start = new Date(panel.started_at)
+  const end = panel.ended_at ? new Date(panel.ended_at) : asOf
+  const elapsed = Math.max(0, (end - start) / 1000)
+  let paused = Number(panel.paused_seconds || 0)
+  // If currently paused, add the live pause duration to the accumulated total
+  if (panel.paused_at && !panel.ended_at) {
+    paused += Math.max(0, (asOf - new Date(panel.paused_at)) / 1000)
+  }
+  return Math.max(0, elapsed - paused)
+}
+
 async function fEndPanel() {
   if (!state.fCurrentPanel) return
   const endedAt = new Date()
-  const dur = Math.max(0, (endedAt - new Date(state.fCurrentPanel.started_at)) / 1000)
+  let paused = Number(state.fCurrentPanel.paused_seconds || 0)
+  // If we're ending the panel while it's paused (operator overrides during stoppage),
+  // accumulate the still-running pause before computing the active duration
+  if (state.fCurrentPanel.paused_at) {
+    paused += Math.max(0, (endedAt - new Date(state.fCurrentPanel.paused_at)) / 1000)
+  }
+  const elapsed = Math.max(0, (endedAt - new Date(state.fCurrentPanel.started_at)) / 1000)
+  const active = Math.max(0, elapsed - paused)
   try {
     const { data, error } = await state.supabase.from('fusing_events')
-      .update({ ended_at: endedAt.toISOString(), duration_seconds: dur })
+      .update({
+        ended_at: endedAt.toISOString(),
+        duration_seconds: active,   // duration_seconds always reflects Active time only
+        paused_seconds: paused,
+        paused_at: null,
+      })
       .eq('id', state.fCurrentPanel.id).select().single()
     if (error) throw error
     const idx = state.fEvents.findIndex(e => e.id === data.id)
@@ -490,7 +518,20 @@ async function fEndPanel() {
 async function fStartStoppage(reason) {
   if (!state.fActiveSession) return
   if (state.fCurrentStoppage) await fEndStoppage()
-  if (state.fCurrentPanel) await fEndPanel()
+  // If a panel is active, pause it instead of ending it.
+  // The pause is "open" — paused_at set, paused_seconds unchanged until resume.
+  if (state.fCurrentPanel && !state.fCurrentPanel.paused_at) {
+    try {
+      const pauseAt = new Date()
+      const { data, error } = await state.supabase.from('fusing_events')
+        .update({ paused_at: pauseAt.toISOString() })
+        .eq('id', state.fCurrentPanel.id).select().single()
+      if (error) throw error
+      const idx = state.fEvents.findIndex(e => e.id === data.id)
+      if (idx >= 0) state.fEvents[idx] = data
+      state.fCurrentPanel = data
+    } catch (e) { state.err = e.message; render(); return }
+  }
   try {
     const { data, error } = await state.supabase.from('fusing_events').insert({
       session_id: state.fActiveSession.id, event_type: 'stoppage',
@@ -515,6 +556,21 @@ async function fEndStoppage() {
     const idx = state.fEvents.findIndex(e => e.id === data.id)
     if (idx >= 0) state.fEvents[idx] = data
     state.fCurrentStoppage = null
+
+    // If a panel was paused at stoppage start, resume it now:
+    // accumulate the pause duration into paused_seconds and clear paused_at.
+    if (state.fCurrentPanel && state.fCurrentPanel.paused_at) {
+      const pauseStart = new Date(state.fCurrentPanel.paused_at)
+      const addedPaused = Math.max(0, (endedAt - pauseStart) / 1000)
+      const totalPaused = Number(state.fCurrentPanel.paused_seconds || 0) + addedPaused
+      const { data: pdata, error: perr } = await state.supabase.from('fusing_events')
+        .update({ paused_seconds: totalPaused, paused_at: null })
+        .eq('id', state.fCurrentPanel.id).select().single()
+      if (perr) throw perr
+      const pidx = state.fEvents.findIndex(e => e.id === pdata.id)
+      if (pidx >= 0) state.fEvents[pidx] = pdata
+      state.fCurrentPanel = pdata
+    }
     render()
   } catch (e) { state.err = e.message; render() }
 }
@@ -1592,7 +1648,7 @@ function fRenderActive() {
 
   const panelTimeFinished = completedPanels.reduce((a, e) => a + (e.duration_seconds || 0), 0)
   const stoppageTimeFinished = completedStoppages.reduce((a, e) => a + (e.duration_seconds || 0), 0)
-  const currentPanelDur = state.fCurrentPanel ? (now - new Date(state.fCurrentPanel.started_at)) / 1000 : 0
+  const currentPanelDur = state.fCurrentPanel ? fPanelActiveSeconds(state.fCurrentPanel, now) : 0
   const currentStoppageDur = state.fCurrentStoppage ? (now - new Date(state.fCurrentStoppage.started_at)) / 1000 : 0
   const totalStoppageTime = stoppageTimeFinished + currentStoppageDur
   const totalPanelTime = panelTimeFinished + currentPanelDur
@@ -1640,7 +1696,12 @@ function fRenderActive() {
 
   let statusLabel, timerLabel, timerVal
   if (state.fCurrentStoppage) {
-    statusLabel = 'Stopped'; timerLabel = 'Stopped for'; timerVal = fmtDuration(currentStoppageDur)
+    if (state.fCurrentPanel && state.fCurrentPanel.paused_at) {
+      statusLabel = `Stopped (Panel #${panels.length} paused)`
+    } else {
+      statusLabel = 'Stopped'
+    }
+    timerLabel = 'Stopped for'; timerVal = fmtDuration(currentStoppageDur)
   } else if (state.fCurrentPanel) {
     statusLabel = 'Panel running'; timerLabel = 'Active panel'; timerVal = fmtDuration(currentPanelDur)
   } else {
@@ -1678,7 +1739,7 @@ function fRenderActive() {
         <div class="status-value">${timerVal}</div>
       </div>
     </div>
-    ${state.fCurrentStoppage ? `<div class="banner">Currently stopped: ${esc(state.fCurrentStoppage.reason_name)}</div>` : ''}
+    ${state.fCurrentStoppage ? `<div class="banner">Currently stopped: ${esc(state.fCurrentStoppage.reason_name)}${state.fCurrentPanel && state.fCurrentPanel.paused_at ? ` · Panel paused — it will resume when you tap Resume` : ''}</div>` : ''}
 
     <div class="card-surface">
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
@@ -1881,7 +1942,7 @@ function computeFusingMetrics(session, events) {
   const isActive = !session.ended_at
   const currentPanel = isActive ? panels.find(e => !e.ended_at) : null
   const currentStoppage = isActive ? stoppages.find(e => !e.ended_at) : null
-  const currentPanelDur = currentPanel ? (now - new Date(currentPanel.started_at)) / 1000 : 0
+  const currentPanelDur = currentPanel ? fPanelActiveSeconds(currentPanel, now) : 0
   const currentStoppageDur = currentStoppage ? (now - new Date(currentStoppage.started_at)) / 1000 : 0
   const totalStoppageTime = stoppageTimeFinished + currentStoppageDur
   const totalPanelTime = panelTimeFinished + currentPanelDur
