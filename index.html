@@ -32,7 +32,8 @@
   input:focus, select:focus { border-color: var(--border-strong); }
   input[type="number"], input[type="text"] { width: 100%; }
   label.inline { font-size: 12px; color: var(--text-2); display: block; margin-bottom: 4px; }
-  button { cursor: pointer; transition: background .15s, transform .05s; }
+  button { cursor: pointer; transition: background .15s, transform .05s; touch-action: manipulation; -webkit-tap-highlight-color: rgba(0,0,0,0.08); }
+  button:active:not(:disabled) { transform: scale(0.97); }
   button:hover { background: var(--surface-2); }
   button:active { transform: scale(.98); }
   button:disabled { opacity: .5; cursor: not-allowed; }
@@ -2850,19 +2851,36 @@ function wireEvents() {
     }
   }
   // Fusing active session buttons
-  const fStartBtn = document.getElementById('f-start-panel-btn')
-  if (fStartBtn) fStartBtn.onclick = () => fStartPanel()
-  const fEndPBtn = document.getElementById('f-end-panel-btn')
-  if (fEndPBtn) fEndPBtn.onclick = () => fEndPanel()
-  const fResumeBtn = document.getElementById('f-resume-btn')
-  if (fResumeBtn) fResumeBtn.onclick = () => fEndStoppage()
-  const fEndBtn = document.getElementById('f-end-session-btn')
-  if (fEndBtn) fEndBtn.onclick = () => fEndSession()
-  document.querySelectorAll('[data-f-reason-id]').forEach(b => {
-    b.onclick = () => {
-      const r = state.fReasons.find(x => x.id === b.dataset.fReasonId)
-      if (r) fStartStoppage(r)
+  // Wrap floor-facing actions in clickOnce: immediately disables the button
+  // and shows a brief busy state while the async op runs. Prevents the
+  // "tapped twice because nothing happened visibly" problem on slow mobile.
+  const clickOnce = (btn, action) => {
+    if (!btn) return
+    btn.onclick = async (e) => {
+      if (btn.dataset.busy === '1') return
+      btn.dataset.busy = '1'
+      btn.disabled = true
+      const originalText = btn.textContent
+      try {
+        await action(e)
+      } finally {
+        // render() will replace the DOM, so these resets only matter if it doesn't.
+        // Safety net for error paths where render isn't called.
+        btn.disabled = false
+        btn.dataset.busy = '0'
+        btn.textContent = originalText
+      }
     }
+  }
+  clickOnce(document.getElementById('f-start-panel-btn'), () => fStartPanel())
+  clickOnce(document.getElementById('f-end-panel-btn'),   () => fEndPanel())
+  clickOnce(document.getElementById('f-resume-btn'),      () => fEndStoppage())
+  clickOnce(document.getElementById('f-end-session-btn'), () => fEndSession())
+  document.querySelectorAll('[data-f-reason-id]').forEach(b => {
+    clickOnce(b, () => {
+      const r = state.fReasons.find(x => x.id === b.dataset.fReasonId)
+      if (r) return fStartStoppage(r)
+    })
   })
 
   // Standard time calculator: live preview and save
@@ -3154,9 +3172,16 @@ function exportCSV() {
   URL.revokeObjectURL(url)
 }
 
-// Tick: re-render every second if on active session with state
+// Tick: re-render every second if on an active session with state.
+// Skipped if a button is mid-click (prevents the DOM swap from eating a tap).
 setInterval(() => {
-  if (state.view === 'active' && state.activeSession) render()
+  // If any button is busy (mid async op), skip this tick — the action's own
+  // render() will catch us up, and we don't want to interrupt a tap.
+  if (document.querySelector('[data-busy="1"]')) return
+
+  const onCuttingActive = state.workspace === 'cutting' && state.view === 'active' && state.activeSession
+  const onFusingActive  = state.workspace === 'fusing'  && state.fView === 'active' && state.fActiveSession
+  if (onCuttingActive || onFusingActive) render()
 }, 1000)
 
 // ============================================================================
