@@ -407,6 +407,7 @@ async function fStartSession(form) {
       panel_count_planned: form.panel_count_planned ? Number(form.panel_count_planned) : null,
       operator: form.operator || null,
       machine: form.machine || null,
+      notes: form.notes || null,
     }
     const { data, error } = await state.supabase.from('fusing_sessions').insert(payload).select().single()
     if (error) throw error
@@ -416,6 +417,20 @@ async function fStartSession(form) {
     state.fView = 'active'
     render()
   } catch (e) { state.err = e.message; render() }
+}
+
+// Update notes on any bundle (active or historical). Used by the notes editor
+// in the active view and detail view. Returns the updated session.
+async function fUpdateNotes(sessionId, notes) {
+  try {
+    const { data, error } = await state.supabase.from('fusing_sessions')
+      .update({ notes: notes || null }).eq('id', sessionId).select().single()
+    if (error) throw error
+    const idx = state.fSessions.findIndex(s => s.id === data.id)
+    if (idx >= 0) state.fSessions[idx] = data
+    if (state.fActiveSession && state.fActiveSession.id === data.id) state.fActiveSession = data
+    return data
+  } catch (e) { state.err = e.message; render(); return null }
 }
 
 async function fEndSession() {
@@ -1632,6 +1647,10 @@ function fRenderStartForm() {
           <input id="ff-machine" />
         </div>
       </div>
+      <div style="margin-bottom: 12px;">
+        <label class="inline">Notes (optional)</label>
+        <textarea id="ff-notes" rows="3" placeholder="Any additional info — fabric type, special instructions, observations…" style="width: 100%; resize: vertical; min-height: 64px; font-family: inherit;"></textarea>
+      </div>
       <button class="btn-success" style="width:100%; padding: 12px;" id="ff-start">▶ Start bundle</button>
     </div>
   `
@@ -1837,11 +1856,31 @@ function fRenderActive() {
     <div class="card-title" style="margin-top:1.5rem;">Fishbone: 4M</div>
     ${renderFishboneFusing(breakdown, totalDowntimeSec, fGetCategory)}
 
+    ${fRenderNotes(s)}
+
     <div class="flex between" style="margin:1.5rem 0 10px;">
       <div class="card-title" style="margin:0;">Event log</div>
       <button class="btn-danger" id="f-end-session-btn">End bundle</button>
     </div>
     ${fRenderEventLog()}
+  `
+}
+
+// Render an editable notes card for a fusing session.
+// Used by both active and detail views.
+// Saves auto-debounced (500ms after typing stops); manual Save button also available.
+function fRenderNotes(session) {
+  const notes = session.notes || ''
+  return `
+    <div class="card-surface">
+      <div class="flex between" style="margin-bottom: 6px; align-items: center;">
+        <div class="card-title" style="margin: 0;">Notes</div>
+        <span id="f-notes-status-${session.id}" class="muted" style="font-size: 12px;">
+          ${notes ? 'Saved.' : '<span style="font-style: italic;">Empty — add anything worth remembering.</span>'}
+        </span>
+      </div>
+      <textarea data-f-notes="${session.id}" rows="3" placeholder="Observations, special instructions, anything worth noting…" style="width: 100%; resize: vertical; min-height: 60px; font-family: inherit;">${esc(notes)}</textarea>
+    </div>
   `
 }
 
@@ -2330,6 +2369,8 @@ function fRenderDetail() {
 
     <div class="card-title" style="margin-top:1.5rem;">Fishbone: 4M</div>
     ${renderFishboneFusing(m.breakdown, m.totalDowntimeSec, fGetCategory)}
+
+    ${fRenderNotes(s)}
 
     <div class="card-title" style="margin-top:1.5rem;">Event log</div>
     ${fRenderEventLog()}`
@@ -2847,6 +2888,7 @@ function wireEvents() {
         panel_count_planned: document.getElementById('ff-count').value,
         operator: document.getElementById('ff-operator').value.trim(),
         machine: document.getElementById('ff-machine').value.trim(),
+        notes: document.getElementById('ff-notes').value.trim(),
       })
     }
   }
@@ -2880,6 +2922,26 @@ function wireEvents() {
     clickOnce(b, () => {
       const r = state.fReasons.find(x => x.id === b.dataset.fReasonId)
       if (r) return fStartStoppage(r)
+    })
+  })
+
+  // Notes auto-save: debounced 500ms after last keystroke.
+  // Uses data-f-notes="<sessionId>" on the textarea and matching status span.
+  document.querySelectorAll('[data-f-notes]').forEach(textarea => {
+    const sessionId = textarea.dataset.fNotes
+    const status = document.getElementById(`f-notes-status-${sessionId}`)
+    let timer = null
+    textarea.addEventListener('input', () => {
+      if (status) { status.textContent = 'Typing…'; status.style.color = 'var(--text-2)' }
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(async () => {
+        if (status) { status.textContent = 'Saving…'; status.style.color = 'var(--text-2)' }
+        const updated = await fUpdateNotes(sessionId, textarea.value.trim())
+        if (status) {
+          if (updated) { status.textContent = 'Saved.'; status.style.color = 'var(--success-text)' }
+          else { status.textContent = 'Save failed — try again.'; status.style.color = 'var(--danger-text)' }
+        }
+      }, 500)
     })
   })
 
@@ -3173,11 +3235,12 @@ function exportCSV() {
 }
 
 // Tick: re-render every second if on an active session with state.
-// Skipped if a button is mid-click (prevents the DOM swap from eating a tap).
+// Skipped if a button is mid-click (prevents the DOM swap from eating a tap)
+// or if the user is currently typing in a textarea (preserves cursor / draft).
 setInterval(() => {
-  // If any button is busy (mid async op), skip this tick — the action's own
-  // render() will catch us up, and we don't want to interrupt a tap.
   if (document.querySelector('[data-busy="1"]')) return
+  const focused = document.activeElement
+  if (focused && focused.tagName === 'TEXTAREA') return
 
   const onCuttingActive = state.workspace === 'cutting' && state.view === 'active' && state.activeSession
   const onFusingActive  = state.workspace === 'fusing'  && state.fView === 'active' && state.fActiveSession
